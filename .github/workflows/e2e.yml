@@ -1,0 +1,65 @@
+# Replay the recorded specs. This workflow never records.
+#
+# Recording needs a model, takes minutes and is not deterministic — none of
+# which belongs on a pull request. Replay is plain Playwright: same input, same
+# result, no API calls. That split is the whole point of the project, so the CI
+# file is where it has to be visible.
+name: E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  replay:
+    # Linux is the cheap runner, and the browsers we replay on are the ones the
+    # docs recommend testing on in CI.
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+          cache: npm
+
+      - run: npm ci
+
+      # Only the browser we actually replay on. Installing all three costs
+      # download time and disk for nothing.
+      - run: npx playwright install chromium --with-deps
+
+      # `status` first: it fails when a feature has no recorded spec. Without
+      # that check such a feature is simply absent from the run, and an absent
+      # test is indistinguishable from a passing one.
+      - name: Check every feature has been recorded
+        run: npm run status
+
+      # The gates have their own counterexamples. A gate that has never rejected
+      # anything is indistinguishable from no gate at all.
+      - name: Test the gates
+        run: npm test
+
+      # Recording applies the gates once, when a spec is made. A rule added
+      # afterwards would never revisit what is already committed.
+      - name: Check recorded specs against the current rules
+        run: npm run check
+
+      - name: Replay
+        run: npm run replay
+        env:
+          # Point at the environment under test. A spec recorded against one
+          # data set proves nothing about another, so this must match whatever
+          # the recording was made against.
+          BASE_URL: ${{ vars.BASE_URL }}
+
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7

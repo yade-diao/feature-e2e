@@ -1,0 +1,41 @@
+{
+  "name": "feature-e2e",
+  "version": "0.1.0",
+  "description": "Record Playwright end-to-end tests from plain-language feature files: an agent walks the steps in a real browser, Playwright's own generator writes the code.",
+  "type": "module",
+  "license": "MIT",
+  "scripts": {
+    "status": "node src/cli.mjs status",
+    "check": "node src/cli.mjs check",
+    "record": "node src/cli.mjs record",
+    "replay": "node src/cli.mjs replay",
+    "test": "node --test \"src/**/*.test.mjs\"",
+    "setup:agents": "playwright init-agents --loop=claude"
+  },
+  "devDependencies": {
+    "@cucumber/gherkin": "^42.0.1",
+    "@cucumber/messages": "^34.2.1",
+    "@playwright/test": "^1.62.1",
+    "eslint": "^10.8.1",
+    "eslint-plugin-playwright": "^2.11.0",
+    "typescript-eslint": "^8.67.0"
+  },
+  "keywords": [
+    "playwright",
+    "e2e",
+    "testing",
+    "gherkin",
+    "codegen",
+    "agent",
+    "mcp",
+    "test-generation"
+  ],
+  "author": "DIAO Daokui",
+  "engines": {
+    "node": ">=20"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yade-diao/feature-e2e.git"
+  }
+}
