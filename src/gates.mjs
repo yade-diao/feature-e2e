@@ -55,6 +55,11 @@ export async function staticGates(featurePath, specPath) {
   const coverage = checkStepCoverage(featurePath, specPath);
   if (coverage.ok) {
     passed.push(`step coverage ${coverage.found}/${coverage.wanted}`);
+  } else if (coverage.empty) {
+    failed.push('step coverage');
+    failures.push(`${featurePath} states no steps, so there is nothing for a recording to verify.`
+      + ` A coverage check would clear it at 0/0 and let a spec that proves nothing through.`
+      + ` Write the scenario's steps, or delete the feature.`);
   } else {
     failed.push('step coverage');
     failures.push(`${coverage.missing.length} feature step(s) have no matching test.step:\n`

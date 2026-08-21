@@ -24,32 +24,11 @@ import { dirname, join, basename } from 'path';
 const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const CONFIG_FILE = join(ROOT, 'eslint.config.mjs');
 import { allSteps } from './feature.mjs';
+import { testSteps, specStrings, actionLocators } from './spec-ast.mjs';
 
 /** Titles of the `test.step(...)` calls in a spec, in source order. */
 export function specStepTitles(specPath) {
-  const src = readFileSync(specPath, 'utf8');
-  const titles = [];
-  const re = /\btest\.step\(\s*(['"`])((?:\\.|(?!\1)[^\\])*)\1/g;
-  let m;
-  while ((m = re.exec(src)) !== null) titles.push(decodeStringLiteral(m[2]));
-  return titles;
-}
-
-/**
- * Decode the body of a JavaScript string literal.
- *
- * The regex captures raw source, so an escape written by the recorder — \u201c,
- * \n, \" — arrives as the characters that spell it rather than the character it
- * means, and the title then fails to match the feature step. JSON.parse does the
- * decoding properly; anything it cannot parse falls back to the raw text, since
- * a title that will not decode is still better compared literally than dropped.
- */
-function decodeStringLiteral(body) {
-  try {
-    return JSON.parse(`"${body.replace(/\\'/g, "'").replace(/(?<!\\)"/g, '\\"')}"`);
-  } catch {
-    return body.replace(/\\(['"`\\])/g, '$1');
-  }
+  return testSteps(specPath).map(s => s.title);
 }
 
 const normalise = t => String(t).replace(/\s+/g, ' ').replace(/["'“”‘’]/g, '"').trim();
@@ -63,6 +42,12 @@ const normalise = t => String(t).replace(/\s+/g, ' ').replace(/["'“”‘’]/
  */
 export function checkStepCoverage(featurePath, specPath) {
   const wanted = allSteps(featurePath).map(s => s.full);
+
+  // No steps is not full coverage. A feature stating nothing clears this gate at
+  // 0/0 and lets through a spec that verifies nothing — the same "absent reads
+  // as passing" the gate exists to refuse.
+  if (!wanted.length) return { ok: false, empty: true, missing: [], extra: [], wanted: 0, found: 0 };
+
   const found = specStepTitles(specPath).map(normalise);
   const missing = wanted.filter(w => !found.includes(normalise(w)));
   const extra = found.filter(f => !wanted.map(normalise).includes(f));
@@ -130,21 +115,12 @@ export async function checkBannedPatterns(specPath) {
  * a second scenario implement the same step wrongly and be cleared by whatever
  * the first one did.
  *
- * Each body runs from the end of its title to the start of the next test.step,
- * or to the end of the file.
+ * Each body is the callback's own source, so a step wrapping a nested step keeps
+ * the nested one inside it.
  */
-function stepBodies(src, step) {
-  const re = /\btest\.step\(\s*(['"`])((?:\\.|(?!\1)[^\\])*)\1/g;
-  const found = [];
-  let m;
-  while ((m = re.exec(src)) !== null) {
-    found.push({ title: decodeStringLiteral(m[2]), start: m.index, end: m.index + m[0].length });
-  }
+function stepBodies(specPath, step) {
   const wanted = normalise(step.full);
-  return found
-    .map((f, i) => ({ ...f, next: i + 1 < found.length ? found[i + 1].start : src.length }))
-    .filter(f => normalise(f.title) === wanted)
-    .map(f => src.slice(f.end, f.next));
+  return testSteps(specPath).filter(s => normalise(s.title) === wanted).map(s => s.body);
 }
 
 /** Matchers that claim something is not there, or is bounded from above. */
@@ -191,12 +167,10 @@ const matchesAny = (res, text) => res.some(re => re.test(text));
  * written in any language.
  */
 export function checkLiveness(featurePath, specPath) {
-  const src = readFileSync(specPath, 'utf8');
-  const bare = src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
   const naked = [];
 
   for (const step of allSteps(featurePath)) {
-    for (const body of stepBodies(bare, step)) {
+    for (const body of stepBodies(specPath, step)) {
       if (!matchesAny(ABSENCE, body)) continue;    // nothing to pair
       if (matchesAny(PRESENCE, body)) continue;    // already paired
       naked.push(step.full);
@@ -232,11 +206,9 @@ export function checkSemanticStability(featurePath, specPath) {
     }
   }
 
-  const src = readFileSync(specPath, 'utf8');
-  const bare = src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
   const flagged = new Set();
-  for (const m of bare.matchAll(/(['"`])((?:\\.|(?!\1)[^\\])*)\1/g)) {
-    const n = normalise(decodeStringLiteral(m[2]));
+  for (const raw of specStrings(specPath)) {
+    const n = normalise(raw);
     if (!n) continue;
     if (anchors.has(n)) continue;
     if (!/\p{Script=Han}/u.test(n)) continue;   // CJK is the page-content signal
@@ -267,13 +239,10 @@ const GENERATED_CLASS = [
 ];
 
 export function checkLocatorRobustness(specPath) {
-  const src = readFileSync(specPath, 'utf8');
-  const bare = src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
   const flagged = new Set();
-  for (const m of bare.matchAll(/(['"`])((?:\\.|(?!\1)[^\\])*)\1/g)) {
-    const n = decodeStringLiteral(m[2]);
-    if (!n) continue;
-    if (GENERATED_CLASS.some(re => re.test(n))) flagged.add(n);
+  for (const raw of specStrings(specPath)) {
+    if (!raw) continue;
+    if (GENERATED_CLASS.some(re => re.test(raw))) flagged.add(raw);
   }
   return { ok: flagged.size === 0, flagged: [...flagged] };
 }
@@ -301,54 +270,15 @@ const ACTION_METHODS = [
 ];
 
 /**
- * Locator sources that drift: visible text (wording changes), alt text, title
- * attributes, and raw CSS. `getByTestId` is deliberately absent — a stable,
- * hand-written testid is the developer's contract with the suite, not a rebuild
- * artifact, so it is treated as stable (matching the recording prompt's
- * locator preference order).
+ * Which sources count as drifting — visible text, alt text, title attributes and
+ * raw CSS — is decided in spec-ast.mjs, where the chain is read off the parse.
+ * `getByTestId` is deliberately not among them: a stable, hand-written testid is
+ * the developer's contract with the suite, not a rebuild artifact, which is the
+ * same order of preference the agent records by.
  */
-const DRIFTABLE = /getByText|getByAltText|getByTitle|\.locator\s*\(/;
-
-const lineOf = (text, index) => text.slice(0, index).split('\n').length;
-const collapse = s => s.replace(/\s+/g, ' ').trim();
-
-/** Does this locator chain need a fallback and lack one? */
-function needsRedundancy(chain) {
-  if (chain.includes('.or(')) return false;   // a fallback is already there
-  return DRIFTABLE.test(chain);               // drifts, and nothing backs it up
-}
-
 export function checkLocatorRedundancy(specPath) {
-  const src = readFileSync(specPath, 'utf8');
-  const bare = src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
-  const actions = ACTION_METHODS.join('|');
-  const naked = [];
-
-  // Inline chain — the generator's usual shape:
-  //   await page.getByTestId('search-input').click();
-  const inlineRe = new RegExp(`(page\\.(?:getBy\\w+|locator)\\([^;]*?)\\.(${actions})\\s*\\(`, 'g');
-  for (const m of bare.matchAll(inlineRe)) {
-    if (needsRedundancy(m[1])) {
-      naked.push({ line: lineOf(bare, m.index), method: m[2], chain: collapse(m[1]) });
-    }
-  }
-
-  // Variable form — collected first so the action can be judged by the locator
-  // it was assigned:
-  //   const input = page.getByTestId('search-input');
-  //   await input.click();
-  const vars = new Map();
-  const varRe = /\b(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(page\.(?:getBy\w+|locator)\([^;]*?);/g;
-  for (const m of bare.matchAll(varRe)) vars.set(m[1], m[2]);
-  if (vars.size) {
-    const varActionRe = new RegExp(`\\b(${[...vars.keys()].join('|')})\\.(${actions})\\s*\\(`, 'g');
-    for (const m of bare.matchAll(varActionRe)) {
-      const chain = vars.get(m[1]);
-      if (chain && needsRedundancy(chain)) {
-        naked.push({ line: lineOf(bare, m.index), method: m[2], chain: collapse(chain) });
-      }
-    }
-  }
-
+  const naked = actionLocators(specPath, ACTION_METHODS)
+    .filter(a => a.driftable && !a.hasFallback)
+    .map(({ line, method, chain }) => ({ line, method, chain }));
   return { ok: naked.length === 0, naked };
 }
