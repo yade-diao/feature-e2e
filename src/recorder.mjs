@@ -17,7 +17,7 @@
  */
 
 import { spawn } from 'child_process';
-import { readFileSync, existsSync, mkdirSync, statSync } from 'fs';
+import { readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync, statSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { featureToSpec, projectOf, SEED_SPEC } from './paths.mjs';
 import { target } from './target.mjs';
@@ -203,6 +203,36 @@ export function invokeAgent(prompt, { timeoutMs = RECORD_TIMEOUT_MS, agent = AGE
     child.stdin.write(prompt);
     child.stdin.end();
   });
+}
+
+/**
+ * Undo a recording the gates would not accept.
+ *
+ * A rejected spec must not be left on disk. `pairing()` decides a feature has
+ * been recorded by finding a spec file where one belongs, so a file the gates
+ * turned away still reads as a recorded feature — and CI runs `status` first
+ * precisely because an unrecorded feature is otherwise indistinguishable from a
+ * passing one. Leaving the reject there is the same failure the gates exist to
+ * prevent: a file on disk standing in for a verified one.
+ *
+ * Restoring matters as much as deleting. Re-recording a feature that already had
+ * a working spec must not cost that spec when the new attempt is turned away.
+ *
+ * @param specPath  where the recording would have gone
+ * @param previous  the file's bytes before the run, or null if there was none
+ * @returns 'restored' when an earlier spec was put back, 'discarded' when the
+ *          reject was removed, 'nothing' when the run left no file behind
+ */
+export function discardRejectedSpec(specPath, previous) {
+  if (previous !== null) {
+    writeFileSync(specPath, previous);
+    return 'restored';
+  }
+  if (existsSync(specPath)) {
+    unlinkSync(specPath);
+    return 'discarded';
+  }
+  return 'nothing';
 }
 
 /** Record one feature. Returns what happened; the caller decides the exit code. */

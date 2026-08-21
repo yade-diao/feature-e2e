@@ -30,11 +30,11 @@ const STEP_REPORT = '.step-report.json';
  * round before. A critique that names only the fault reads as if nothing else
  * mattered.
  */
-function reject(passed, body) {
+function reject(passed, body, failed = []) {
   const kept = passed.length
     ? `Already correct — keep these as they are:\n${passed.map(p => `  - ${p}`).join('\n')}\n\n`
     : '';
-  return { ok: false, passed, critique: kept + body };
+  return { ok: false, passed, failed, critique: kept + body };
 }
 
 /**
@@ -49,12 +49,14 @@ function reject(passed, body) {
  */
 export async function staticGates(featurePath, specPath) {
   const passed = [];
+  const failed = [];
   const failures = [];
 
   const coverage = checkStepCoverage(featurePath, specPath);
   if (coverage.ok) {
     passed.push(`step coverage ${coverage.found}/${coverage.wanted}`);
   } else {
+    failed.push('step coverage');
     failures.push(`${coverage.missing.length} feature step(s) have no matching test.step:\n`
       + coverage.missing.map(m => `  - ${m}`).join('\n')
       + `\n\nEvery step of the scenario must appear as \`await test.step('<step text verbatim>', ...)\`.`
@@ -65,6 +67,7 @@ export async function staticGates(featurePath, specPath) {
   if (banned.ok) {
     passed.push('no banned patterns');
   } else {
+    failed.push('banned patterns');
     failures.push(`${banned.hits.length} banned pattern(s):\n`
       + banned.hits.map(h => `  line ${h.line}: ${h.what}\n    ${h.text.slice(0, 100)}\n    ${h.why}`).join('\n')
       + `\n\n\`.first()\`/\`.nth()\`/\`.last()\` pin to DOM order, which drifts when rows reorder or filter.`
@@ -76,6 +79,7 @@ export async function staticGates(featurePath, specPath) {
   if (liveness.ok) {
     passed.push('absence assertions have liveness evidence');
   } else {
+    failed.push('liveness');
     failures.push(`${liveness.naked.length} step(s) assert only absence or an upper bound:\n`
       + liveness.naked.map(n => `  - ${n}`).join('\n')
       + `\n\nZero satisfies "at most N", and "nothing matches" is satisfied by nothing being there at all,`
@@ -89,6 +93,7 @@ export async function staticGates(featurePath, specPath) {
   if (redundancy.ok) {
     passed.push('every action has a stable locator or a fallback');
   } else {
+    failed.push('locator redundancy');
     failures.push(`${redundancy.naked.length} action(s) are located in only one way, and that one way will drift:\n`
       + redundancy.naked.map(n => `  line ${n.line}: ${n.method}() on "${n.chain}"`).join('\n')
       + `\n\nAn action that stops matching fails the whole test — every assertion after it never runs.`
@@ -97,10 +102,10 @@ export async function staticGates(featurePath, specPath) {
   }
 
   if (failures.length) {
-    return reject(passed, failures.join('\n\n'));
+    return reject(passed, failures.join('\n\n'), failed);
   }
 
-  return { ok: true, passed, critique: null };
+  return { ok: true, passed, failed: [], critique: null };
 }
 
 /**
@@ -170,7 +175,7 @@ export function replayGate(specPaths) {
     return { ...reject(passed, `the recorded spec does not replay:\n\n${detail.slice(0, 2500)}`
       + `\n\nThis is the run failing against the live page, so the problem is in the recording itself`
       + ` — a locator that was never really there, a wait that was never really needed, or a step`
-      + ` performed in the wrong order.`), redSpecs };
+      + ` performed in the wrong order.`, ['replay']), redSpecs };
   }
   passed.push('replays green');
 
@@ -178,7 +183,7 @@ export function replayGate(specPaths) {
   // assertions and an empty test.step all exit 0. Seeing zero steps means the
   // reporter never ran, which is a tool failure, not a passing suite.
   if (!steps.length) {
-    return { ok: false, passed, critique: null,
+    return { ok: false, passed, failed: [], critique: null,
       inconclusive: 'the step reporter produced nothing — Playwright exited 0 but no test.step was observed' };
   }
   const substance = checkStepSubstance(steps);
@@ -186,11 +191,11 @@ export function replayGate(specPaths) {
     return reject(passed, `${substance.empty.length} test.step ran but performed no action, assertion or attachment:\n`
       + substance.empty.map(e => `  - ${e.title}`).join('\n')
       + `\n\nAn empty step reads as coverage while proving nothing. If the step only asks for something`
-      + ` to be looked at, attach the evidence inside it with testInfo.attach and a screenshot.`);
+      + ` to be looked at, attach the evidence inside it with testInfo.attach and a screenshot.`, ['step substance']);
   }
   passed.push(`${substance.total} steps, none empty`);
 
-  return { ok: true, passed, critique: null, stepCount: substance.total };
+  return { ok: true, passed, failed: [], critique: null, stepCount: substance.total };
 }
 
 /** All five gates, cheapest first — what a recording has to clear. */
