@@ -46,108 +46,43 @@ const MCP_CONFIG = '.mcp.json';
 export function buildPrompt({ featurePath, specPath, featureText, baseURL, critique = null }) {
   const where = target(baseURL);
   const reportJson = reportPaths(featurePath).json;
-  return `Record a Playwright test from the Gherkin feature below.
+  return `Verify the business logic in the feature below against the live page, and
+have the generator record what held.
 
-Source feature file: ${featurePath}
-Target spec file:    ${specPath}
-Seed file:           ${SEED_FILE}
-Start path:          ${where.path}   (relative to baseURL ${where.origin})
+Source feature:  ${featurePath}
+Seed file:       ${SEED_FILE}
+Start path:      ${where.path}   (relative to baseURL ${where.origin})
+Write the spec to:                       ${specPath}
+Write a diagnosis there instead, if a step cannot be verified:
+                                         ${reportJson}
 
 --- FEATURE ---
 ${featureText}
 --- END FEATURE ---
 
-Follow the generator workflow, with verification as the goal:
-1. generator_setup_page — pass the feature text above verbatim as \`plan\`, and "${SEED_FILE}" as \`seedFile\`.
-2. Work through the scenario one step at a time in the real browser using the browser_* tools.
-   Use each step's text as the intent of the tool call, and confirm each step's
-   business logic actually holds before moving on.
-3. generator_read_log
-4. If every step verified, generator_write_test — write to exactly ${specPath}.
-   If any step could not be verified, write the diagnosis report instead (below).
+Pass the feature text above verbatim as the \`plan\` to generator_setup_page, and
+"${SEED_FILE}" as \`seedFile\`.
 
-Shape of the generated file:
-- describe title = the Feature name; test title = the Scenario name.
-- Wrap the work of each feature step in
-  \`await test.step('<the step text verbatim>', async () => { ... })\`.
-  This overrides your agent definition, which asks for a comment above each step:
-  a comment is invisible at runtime, so a step that silently did nothing cannot be
-  told apart from one that worked. Use test.step, and put the step text in the
-  title exactly as the feature words it — that binding is what lets a failure name
-  the business step it came from.
-- Give every step something to do. Where a step only asks for something to be
-  looked at, attach the evidence:
-  \`await testInfo.attach('<name>', { body: await page.screenshot(), contentType: 'image/png' })\`.
-- Navigate with the path only: \`await page.goto('${where.path}')\`. The origin comes
-  from baseURL, so the same recording runs against another environment unchanged.
+How to work is in your agent definition and does not change between runs: the
+workflow, which tools land in the recording, what you may not do to the page,
+how to choose and stack locators, what an assertion has to claim, the shape of
+the file, and what a diagnosis must contain. Follow it.
 
-Look first, then act once:
-- browser_find({ text }), browser_snapshot and browser_generate_locator take no
-  \`intent\` and stay out of the recording. Work out what to do with those.
-- Every action tool requires an \`intent\` and lands in the recording, so decide
-  before you act rather than by trying.
-- A full-page snapshot of a data-dense page runs to 80-150 KB and has stalled a
-  recording outright. Scope it with { target } or { depth }, or use browser_find.
+Two rules are worth repeating here because they are the two that actually get
+recordings rejected:
 
-Locators — pick them to survive a rebuild, in this order of preference:
-1. Role + accessible name — \`page.getByRole('button', { name: '...' })\`. Role is
-   accessibility semantics, not markup, so it survives DOM reshuffles, class
-   hashes and framework upgrades.
-2. Form semantics — \`getByLabel\`, \`getByPlaceholder\`, \`getByTitle\`.
-3. \`getByTestId\` — only when the value is a stable, hand-written literal. Never
-   a testid that embeds an id, index or hash.
-4. Visible text — prefer a substring or regex over an exact full string so a
-   wording tweak does not break it: \`getByText(/search/i)\`.
-5. CSS — last resort, and only a semantic class. Never record a generated class:
-   CSS modules (\`.Module_x__ab12cd\`), styled-components (\`sc-...\`), emotion
-   (\`css-...\`). They change on every build and are the single most common reason
-   a recorded test goes red the next morning.
-
-Make locators redundant rather than clever:
-- Chain from a stable anchor instead of a positional nth():
-  \`page.getByTestId('job-table').getByRole('button', { name: '...' })\`.
-- Where a trait can drift (a renamed testid, a reworded label), record a backup
-  chain with \`.or()\` — the first locator that still matches wins:
-  \`page.getByTestId('search-input').or(page.getByRole('textbox', { name: /搜索/ }))\`.
-
-Assertions say what the feature says:
-- For "every remaining row mentions X":
-  \`await expect(rows.filter({ hasNotText: 'X' })).toHaveCount(0)\`.
-- Assert structure rather than the data that happened to be on screen. A headline
-  or a product name read off the page during recording expires; that a heading
-  exists does not. \`toMatchAriaSnapshot\` takes regular expressions for values
-  that move.
-- Use web-first assertions throughout — they wait and retry, which is how
-  readiness is expressed.
-- Never prove "the list is showing things" with a positional locator — \`.first()\`,
-  \`.nth()\`, \`.last()\` are rejected. Use a count assertion
-  (\`await expect(rows).toHaveCount(n)\` / \`.toBeGreaterThanOrEqual(n)\`) or name a
-  specific row with role/text.
-- Where a step claims something is absent or bounded above ("no error", "at most
-  N"), assert in the same step that something which should be present is present.
-  Zero satisfies "at most N", so on its own such a step passes on a blank page.
-
-Verification comes first — the spec is what is left when every step holds:
-- Work through every step and confirm its business logic actually holds. A step
-  that verifies is recorded; a step that does not is diagnosed, never faked.
-- When a step cannot be verified, exhaust every means before concluding: try an
-  alternative locator, wait and retry, inspect the network responses and console
-  messages. Only then record a diagnosis for that step.
-- If any step fails, write a diagnosis report instead of the spec: one JSON
-  object at ${reportJson}, conforming to schemas/diagnosis.schema.json. The
-  fields and their closed enums are all spelled out there — in particular
-  \`verdict.category\` is one of frontend|backend|environment|unverifiable and
-  every \`evidence.type\` is one of network|console|snapshot|dom|assertion.
-  Choose the category from evidence you actually observed (a network status, a
-  console error, a snapshot), never from a guess, and fill the attempt field to
-  show how far you got.
+1. Every feature step becomes \`await test.step('<step text>', ...)\` with the
+   text **exactly** as the feature words it, Gherkin keyword and all — "Given the
+   applicant is on the recruitment entry page", not "the applicant is on the
+   recruitment entry page". A title that drops the keyword counts as a missing
+   step.
+2. No \`.first()\`, \`.nth()\` or \`.last()\`, anywhere, including in an assertion
+   written only to prove the list is alive. Use \`toHaveCount(n)\` or
+   \`.toBeGreaterThanOrEqual(n)\` instead.
 
 The recording is checked automatically and sent back with specific reasons if it
-does not hold up, so aim for the shape above rather than trying to guess every
-rule.
-
-Do not write the spec file by hand. If the generator tools are unavailable, stop
-and say so rather than producing a file some other way.${critique ? `
+does not hold up, so aim for the shape your definition describes rather than
+trying to guess every rule.${critique ? `
 
 ## A previous attempt was rejected
 
