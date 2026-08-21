@@ -40,8 +40,13 @@ export function summary(attempts = readAttempts()) {
   const firstTry = [...runs.values()].filter(r => r[0]?.ok).length;
   const byGate = new Map();
   for (const a of attempts) {
-    if (a.ok || !a.gate) continue;
-    byGate.set(a.gate, (byGate.get(a.gate) ?? 0) + 1);
+    if (a.ok) continue;
+    // `gates` is the current shape and names every gate that said no. `gate` is
+    // what older lines carry; it was inferred from how many gates passed and can
+    // name a gate that actually passed, so those counts are not to be trusted.
+    for (const g of a.gates ?? (a.gate ? [a.gate] : [])) {
+      byGate.set(g, (byGate.get(g) ?? 0) + 1);
+    }
   }
   return {
     runs: runs.size,

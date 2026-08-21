@@ -19,8 +19,8 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
-import { FEATURE_DIR, listFeatures, pairing, specToFeature } from './paths.mjs';
-import { recordFeature } from './recorder.mjs';
+import { FEATURE_DIR, featureToSpec, listFeatures, pairing, specToFeature } from './paths.mjs';
+import { recordFeature, discardRejectedSpec } from './recorder.mjs';
 import { healFeature } from './healer.mjs';
 import { runGates, staticGates, replayGate } from './gates.mjs';
 import { checkSemanticStability, checkLocatorRobustness } from './checks.mjs';
@@ -94,11 +94,6 @@ function cmdStatus() {
  */
 const MAX_ATTEMPTS = 3;
 
-/** Gate names in the order runGates applies them — used to label a rejection. */
-const GATE_ORDER = [
-  'step coverage', 'banned patterns', 'liveness', 'locator redundancy', 'replay', 'step substance',
-];
-
 async function cmdRecord() {
   const features = resolveTargets(target);
   console.log(`recording ${features.length} feature(s)\n`);
@@ -110,6 +105,13 @@ async function cmdRecord() {
     console.log(`  ${feature}`);
     let critique = null;
     let done = false;
+
+    // The spec as it stands before this run, so a run that ends with nothing the
+    // gates accept can be undone. Leaving a rejected spec on disk would let it
+    // count as a recording in `status`, and re-recording a working feature must
+    // not cost the spec that worked.
+    const specPath = featureToSpec(feature);
+    const specBefore = existsSync(specPath) ? readFileSync(specPath) : null;
 
     for (let attempt = 1; attempt <= MAX_ATTEMPTS && !done; attempt++) {
       if (attempt > 1) console.log(`    retry ${attempt}/${MAX_ATTEMPTS} with the critique above`);
@@ -144,11 +146,15 @@ async function cmdRecord() {
       const verdict = await runGates(feature, result.specPath);
       for (const p of verdict.passed) console.log(`      ok  ${p}`);
 
-      // The gate that stopped it is the one after the last that passed.
+      // Which gates said no, as named by the gates themselves. Inferring it from
+      // how many passed was wrong: staticGates runs all four and reports them
+      // together, so the ones that passed are not a prefix of any fixed order —
+      // a rejection by step coverage and banned patterns was filed under
+      // "liveness", a gate that had in fact passed.
       logAttempt({
         run: runId, feature, attempt, ms: result.ms, ok: verdict.ok,
         passed: verdict.passed.length,
-        gate: verdict.ok ? null : (verdict.inconclusive ? 'inconclusive' : GATE_ORDER[verdict.passed.length] ?? 'unknown'),
+        gates: verdict.ok ? [] : (verdict.inconclusive ? ['inconclusive'] : (verdict.failed ?? [])),
       });
 
       if (verdict.ok) { done = true; break; }
@@ -164,7 +170,15 @@ async function cmdRecord() {
       critique = verdict.critique;
     }
 
-    if (!done) failed++;
+    if (!done) {
+      failed++;
+      const undo = discardRejectedSpec(specPath, specBefore);
+      if (undo === 'restored') {
+        console.log(`    kept the previous ${specPath} — every attempt in this run was turned away`);
+      } else if (undo === 'discarded') {
+        console.log(`    discarded ${specPath} — a spec the gates turned away is not a recording`);
+      }
+    }
   }
 
   const s = summary();
@@ -199,7 +213,20 @@ function targetSpecs() {
  */
 async function cmdCheck() {
   const specs = targetSpecs();
-  if (!specs.length) { console.log('no recorded specs to check'); return 1; }
+  if (!specs.length) {
+    // An explicit target that matches nothing is a question with no answer, and
+    // stays an error. Nothing recorded at all is not: `status` is the command
+    // that fails on a feature with no spec, and CI runs it first for exactly
+    // that reason. Failing here as well only means a checkout that carries the
+    // tool without a suite can never go green, while adding nothing `status`
+    // did not already say.
+    if (target) { console.log(`no recorded specs for "${target}"`); return 1; }
+    const { missingSpec } = pairing();
+    console.log(missingSpec.length
+      ? `no recorded specs to check — ${missingSpec.length} feature(s) are waiting to be recorded (run: status)`
+      : 'no recorded specs to check');
+    return 0;
+  }
 
   console.log(`checking ${specs.length} spec(s) — static gates only, no browser\n`);
   let bad = 0;
