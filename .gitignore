@@ -12,6 +12,11 @@ blob-report/
 # generator / healer definitions that `setup:agents` regenerates on demand.
 !.claude/agents/verify.md
 
+# Also written by `setup:agents` — a placeholder directory for test plans, which
+# this project does not use. It is not ignored idly: CI once swept it into a
+# commit that claimed to have healed a locator.
+specs/
+
 # Playwright MCP scratch output (console logs, page snapshots)
 .playwright-mcp/
 
