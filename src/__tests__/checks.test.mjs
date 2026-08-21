@@ -329,3 +329,38 @@ test('locator redundancy: rejects a variable-held action located only by text', 
   f.cleanup();
 });
 
+
+// ── locator redundancy across line breaks ────────────────────────────────────
+//
+// The generator formats a long chain over several lines, so `page` and
+// `.getByText(` land on separate lines. A pattern that required them adjacent
+// matched none of that — the gate passed every multi-line action it existed to
+// reject, which is the shape the generator actually emits.
+
+test('locator redundancy: a naked action still counts when the chain is split over lines', () => {
+  const f = fixture(FEATURE(['Given a page']), SPEC(`    await page
+      .getByText('清空筛选')
+      .click();`));
+  const r = checkLocatorRedundancy(f.spec);
+  assert.equal(r.ok, false, 'formatting a chain across lines must not hide the action');
+  assert.equal(r.naked[0].method, 'click');
+  f.cleanup();
+});
+
+test('locator redundancy: a split chain assigned to a variable counts too', () => {
+  const f = fixture(FEATURE(['Given a page']), SPEC(`    const reset = page
+      .getByText('清空筛选');
+    await reset.click();`));
+  assert.equal(checkLocatorRedundancy(f.spec).ok, false);
+  f.cleanup();
+});
+
+test('locator redundancy: a split chain that does carry .or() is still let through', () => {
+  const f = fixture(FEATURE(['Given a page']), SPEC(`    await page
+      .getByTestId('reset-filters')
+      .or(page.getByText('清空筛选'))
+      .click();`));
+  assert.equal(checkLocatorRedundancy(f.spec).ok, true,
+    'a fallback chain is what the gate asks for — line breaks must not turn it into a rejection');
+  f.cleanup();
+});
