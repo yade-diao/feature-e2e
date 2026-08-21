@@ -1,10 +1,14 @@
 /**
  * Counterexamples for the exit codes, run through the CLI itself.
  *
- * `check` used to exit 1 whenever there was nothing to check, which reads as
- * "these specs break the rules" when what happened is that there are no specs.
- * A checkout that carries the tool without a suite could then never go green,
- * and CI stopped at a step that had found nothing wrong.
+ * `check` and `replay` used to exit 1 whenever there was nothing to run, which
+ * reads as "these specs break the rules" when what happened is that there are no
+ * specs. A checkout that carries the tool without a suite could then never go
+ * green, and CI stopped at a step that had found nothing wrong.
+ *
+ * For `replay` it cost more than a red step. CI runs it with continue-on-error,
+ * so its exit code is not a verdict but the signal to wake the healer — and an
+ * empty suite sent every run down that path to heal nothing.
  *
  * Not checking anything is still not the same as everything being fine, so the
  * other half is here too: an unrecorded feature must still fail — under
@@ -60,5 +64,28 @@ test('check: a named target with nothing behind it stays an error', () => {
   const c = checkout({ withFeature: true });
   const r = run(['check', 'demo'], c.dir);
   assert.equal(r.status, 1, 'asking about something that is not there has no answer');
+  c.cleanup();
+});
+
+test('replay: an empty suite must not wake the healer', () => {
+  const c = checkout();
+  const r = run(['replay'], c.dir);
+  assert.equal(r.status, 0,
+    `CI reads a red replay as "a spec broke, go heal it"\n${r.stdout}${r.stderr}`);
+  c.cleanup();
+});
+
+test('replay: an unrecorded feature is named, not failed on', () => {
+  const c = checkout({ withFeature: true });
+  const r = run(['replay'], c.dir);
+  assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+  assert.match(r.stdout, /1 feature\(s\) are waiting to be recorded/);
+  c.cleanup();
+});
+
+test('replay: a named target with nothing behind it stays an error', () => {
+  const c = checkout({ withFeature: true });
+  const r = run(['replay', 'demo'], c.dir);
+  assert.equal(r.status, 1, 'asking to replay something that was never recorded has no answer');
   c.cleanup();
 });

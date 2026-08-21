@@ -275,8 +275,18 @@ async function cmdCheck() {
 function cmdReplay() {
   const specs = targetSpecs().map(p => p.spec);
   if (!specs.length) {
-    console.log(target ? `no recorded specs for "${target}"` : 'no recorded specs yet');
-    return 1;
+    // The same split as `check`, and here it costs more to get wrong. CI runs
+    // replay with continue-on-error, so its exit code is not a verdict — it is
+    // the signal that a spec went red and the healer should be woken. An empty
+    // suite exiting 1 sends every run down that path: install the CLI,
+    // regenerate the agents, spend a key, heal nothing. A named target with
+    // nothing behind it stays an error, as it does everywhere else.
+    if (target) { console.log(`no recorded specs for "${target}"`); return 1; }
+    const { missingSpec } = pairing();
+    console.log(missingSpec.length
+      ? `nothing to replay — ${missingSpec.length} feature(s) are waiting to be recorded (run: status)`
+      : 'nothing to replay');
+    return 0;
   }
   console.log(`replaying ${specs.length} spec(s) (pure Playwright, no model calls)\n`);
 

@@ -105,12 +105,17 @@ jobs:
       # `[skip ci]`: the healer already re-ran the red specs to green. Pushing
       # the fix must not re-trigger the whole workflow for a 2-hour replay of
       # specs that already passed.
+      # Stage only what healing is allowed to touch — the specs it rewrites and
+      # the diagnoses it writes. `git add -A` was wider than the truth: the
+      # setup step above generates files of its own, and a run that healed
+      # nothing still swept them into a commit saying it had healed a locator.
       - name: Push the repaired spec
         if: steps.heal.outcome == 'success'
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A
+          git add -A tests/run
+          if [ -d reports ]; then git add -A reports; fi
           git diff --cached --quiet || git commit -m "test: heal locators that went red in CI [skip ci]"
           git push
 
