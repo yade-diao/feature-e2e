@@ -18,7 +18,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { checkStepCoverage, checkBannedPatterns, checkStepSubstance } from '../checks.mjs';
+import { checkStepCoverage, checkBannedPatterns, checkStepSubstance, checkSemanticStability, checkLocatorRobustness, checkLocatorRedundancy } from '../checks.mjs';
 
 /** Write a feature and a spec to a scratch directory and hand back their paths. */
 function fixture(featureBody, specBody) {
@@ -195,6 +195,137 @@ test('liveness: a step with no absence assertion is not checked', async () => {
       await expect(page.getByRole('list')).toBeVisible();
     });`));
   assert.equal(checkLiveness(f.feature, f.spec).ok, true);
+  f.cleanup();
+});
+
+// ── semantic stability ──────────────────────────────────────────────────────
+
+test('semantic: flags CJK content asserted but not authorised by the feature', () => {
+  const f = fixture(
+    FEATURE(['Then the article page shows a headline']),
+    SPEC(`    await test.step('Then the article page shows a headline', async () => {
+      await expect(page.getByRole('heading', { name: '三部门发文优化城乡社区' })).toBeVisible();
+    });`));
+  assert.deepEqual(checkSemanticStability(f.feature, f.spec).flagged, ['三部门发文优化城乡社区']);
+  f.cleanup();
+});
+
+test('semantic: allows CJK labels the feature quoted verbatim', () => {
+  const f = fixture(
+    FEATURE(['When the reader opens the "教育" channel']),
+    SPEC(`    await test.step('When the reader opens the "教育" channel', async () => {
+      await page.getByRole('link', { name: '教育' }).click();
+    });`));
+  assert.equal(checkSemanticStability(f.feature, f.spec).flagged.length, 0);
+  f.cleanup();
+});
+
+test('semantic: ignores English titles, roles and import paths', () => {
+  const f = fixture(
+    FEATURE(['Then the list is shown']),
+    SPEC(`    await test.step('Then the list is shown', async () => {
+      await expect(page.getByRole('list')).toBeVisible();
+    });`));
+  assert.equal(checkSemanticStability(f.feature, f.spec).flagged.length, 0);
+  f.cleanup();
+});
+
+// ── locator robustness ──────────────────────────────────────────────────────
+
+test('locator: flags a CSS-module hash class', () => {
+  const f = fixture(
+    FEATURE(['Then the button is shown']),
+    SPEC(`    await test.step('Then the button is shown', async () => {
+      await expect(page.locator('.Button_primary__3xK9f')).toBeVisible();
+    });`));
+  assert.deepEqual(checkLocatorRobustness(f.spec).flagged, ['.Button_primary__3xK9f']);
+  f.cleanup();
+});
+
+test('locator: flags styled-components and emotion generated classes', () => {
+  const f = fixture(
+    FEATURE(['Then the widget is shown']),
+    SPEC(`    await test.step('Then the widget is shown', async () => {
+      await expect(page.locator('.sc-bdVaJa')).toBeVisible();
+      await expect(page.locator('.css-1vz4ukc')).toBeVisible();
+    });`));
+  assert.deepEqual(checkLocatorRobustness(f.spec).flagged, ['.sc-bdVaJa', '.css-1vz4ukc']);
+  f.cleanup();
+});
+
+test('locator: allows role, text, testid and semantic class locators', () => {
+  const f = fixture(
+    FEATURE(['Then the list is shown']),
+    SPEC(`    await test.step('Then the list is shown', async () => {
+      await expect(page.getByRole('list')).toBeVisible();
+      await expect(page.getByTestId('job-table')).toBeVisible();
+      await expect(page.getByText('清空筛选')).toBeVisible();
+      await expect(page.locator('.toolbar')).toBeVisible();
+    });`));
+  assert.equal(checkLocatorRobustness(f.spec).flagged.length, 0);
+  f.cleanup();
+});
+
+// ── locator redundancy ───────────────────────────────────────────────────────
+
+test('locator redundancy: accepts an action located only by testid — a stable testid is a contract, not a drift source', () => {
+  const f = fixture(
+    FEATURE(['Given a page']),
+    SPEC(`    await test.step('Given a page', async () => {
+      await page.getByTestId('search-input').click();
+    });`));
+  assert.equal(checkLocatorRedundancy(f.spec).ok, true);
+  f.cleanup();
+});
+
+test('locator redundancy: rejects an action located only by css', () => {
+  const f = fixture(
+    FEATURE(['Given a page']),
+    SPEC(`    await test.step('Given a page', async () => {
+      await page.locator('.toolbar .btn').click();
+    });`));
+  assert.equal(checkLocatorRedundancy(f.spec).ok, false);
+  f.cleanup();
+});
+
+test('locator redundancy: accepts an action with a .or() fallback chain', () => {
+  const f = fixture(
+    FEATURE(['Given a page']),
+    SPEC(`    await test.step('Given a page', async () => {
+      await page.getByTestId('search-input').or(page.getByRole('textbox', { name: 'search' })).click();
+    });`));
+  assert.equal(checkLocatorRedundancy(f.spec).ok, true);
+  f.cleanup();
+});
+
+test('locator redundancy: accepts an action located by role alone', () => {
+  const f = fixture(
+    FEATURE(['Given a page']),
+    SPEC(`    await test.step('Given a page', async () => {
+      await page.getByRole('button', { name: 'search' }).click();
+    });`));
+  assert.equal(checkLocatorRedundancy(f.spec).ok, true);
+  f.cleanup();
+});
+
+test('locator redundancy: ignores assertions — a failing assertion is the signal', () => {
+  const f = fixture(
+    FEATURE(['Given a page']),
+    SPEC(`    await test.step('Given a page', async () => {
+      await expect(page.getByTestId('job-table')).toBeVisible();
+    });`));
+  assert.equal(checkLocatorRedundancy(f.spec).ok, true);
+  f.cleanup();
+});
+
+test('locator redundancy: rejects a variable-held action located only by text', () => {
+  const f = fixture(
+    FEATURE(['Given a page']),
+    SPEC(`    await test.step('Given a page', async () => {
+      const input = page.getByText('搜索');
+      await input.click();
+    });`));
+  assert.equal(checkLocatorRedundancy(f.spec).ok, false);
   f.cleanup();
 });
 

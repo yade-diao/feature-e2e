@@ -21,6 +21,7 @@ import { readFileSync, existsSync, mkdirSync, statSync } from 'fs';
 import { dirname, resolve } from 'path';
 import { featureToSpec, projectOf, SEED_SPEC } from './paths.mjs';
 import { target } from './target.mjs';
+import { reportPaths, finalizeDiagnosis } from './diagnose.mjs';
 
 /**
  * The generator opens the application through this seed test, so Playwright has
@@ -31,7 +32,7 @@ import { target } from './target.mjs';
  * is one definition of where it is.
  */
 export const SEED_FILE = SEED_SPEC.split('\\').join('/');
-const AGENT = 'playwright-test-generator';
+const AGENT = 'verify';
 const MCP_CONFIG = '.mcp.json';
 
 /**
@@ -44,6 +45,7 @@ const MCP_CONFIG = '.mcp.json';
  */
 export function buildPrompt({ featurePath, specPath, featureText, baseURL, critique = null }) {
   const where = target(baseURL);
+  const reportJson = reportPaths(featurePath).json;
   return `Record a Playwright test from the Gherkin feature below.
 
 Source feature file: ${featurePath}
@@ -55,12 +57,14 @@ Start path:          ${where.path}   (relative to baseURL ${where.origin})
 ${featureText}
 --- END FEATURE ---
 
-Follow the generator workflow exactly:
+Follow the generator workflow, with verification as the goal:
 1. generator_setup_page — pass the feature text above verbatim as \`plan\`, and "${SEED_FILE}" as \`seedFile\`.
-2. Execute the scenario one step at a time in the real browser using the browser_* tools.
-   Use each step's text as the intent of the tool call.
+2. Work through the scenario one step at a time in the real browser using the browser_* tools.
+   Use each step's text as the intent of the tool call, and confirm each step's
+   business logic actually holds before moving on.
 3. generator_read_log
-4. generator_write_test — write to exactly ${specPath}
+4. If every step verified, generator_write_test — write to exactly ${specPath}.
+   If any step could not be verified, write the diagnosis report instead (below).
 
 Shape of the generated file:
 - describe title = the Feature name; test title = the Scenario name.
@@ -85,9 +89,26 @@ Look first, then act once:
 - A full-page snapshot of a data-dense page runs to 80-150 KB and has stalled a
   recording outright. Scope it with { target } or { depth }, or use browser_find.
 
-Locators: prefer role, text and label, and narrow down by chaining and filtering —
-\`page.getByRole('navigation').getByRole('link', { name: '...' })\`,
-\`page.getByRole('listitem').filter({ hasText: '...' })\`.
+Locators — pick them to survive a rebuild, in this order of preference:
+1. Role + accessible name — \`page.getByRole('button', { name: '...' })\`. Role is
+   accessibility semantics, not markup, so it survives DOM reshuffles, class
+   hashes and framework upgrades.
+2. Form semantics — \`getByLabel\`, \`getByPlaceholder\`, \`getByTitle\`.
+3. \`getByTestId\` — only when the value is a stable, hand-written literal. Never
+   a testid that embeds an id, index or hash.
+4. Visible text — prefer a substring or regex over an exact full string so a
+   wording tweak does not break it: \`getByText(/search/i)\`.
+5. CSS — last resort, and only a semantic class. Never record a generated class:
+   CSS modules (\`.Module_x__ab12cd\`), styled-components (\`sc-...\`), emotion
+   (\`css-...\`). They change on every build and are the single most common reason
+   a recorded test goes red the next morning.
+
+Make locators redundant rather than clever:
+- Chain from a stable anchor instead of a positional nth():
+  \`page.getByTestId('job-table').getByRole('button', { name: '...' })\`.
+- Where a trait can drift (a renamed testid, a reworded label), record a backup
+  chain with \`.or()\` — the first locator that still matches wins:
+  \`page.getByTestId('search-input').or(page.getByRole('textbox', { name: /搜索/ }))\`.
 
 Assertions say what the feature says:
 - For "every remaining row mentions X":
@@ -98,9 +119,28 @@ Assertions say what the feature says:
   that move.
 - Use web-first assertions throughout — they wait and retry, which is how
   readiness is expressed.
+- Never prove "the list is showing things" with a positional locator — \`.first()\`,
+  \`.nth()\`, \`.last()\` are rejected. Use a count assertion
+  (\`await expect(rows).toHaveCount(n)\` / \`.toBeGreaterThanOrEqual(n)\`) or name a
+  specific row with role/text.
 - Where a step claims something is absent or bounded above ("no error", "at most
   N"), assert in the same step that something which should be present is present.
   Zero satisfies "at most N", so on its own such a step passes on a blank page.
+
+Verification comes first — the spec is what is left when every step holds:
+- Work through every step and confirm its business logic actually holds. A step
+  that verifies is recorded; a step that does not is diagnosed, never faked.
+- When a step cannot be verified, exhaust every means before concluding: try an
+  alternative locator, wait and retry, inspect the network responses and console
+  messages. Only then record a diagnosis for that step.
+- If any step fails, write a diagnosis report instead of the spec: one JSON
+  object at ${reportJson}, conforming to schemas/diagnosis.schema.json. The
+  fields and their closed enums are all spelled out there — in particular
+  \`verdict.category\` is one of frontend|backend|environment|unverifiable and
+  every \`evidence.type\` is one of network|console|snapshot|dom|assertion.
+  Choose the category from evidence you actually observed (a network status, a
+  console error, a snapshot), never from a guess, and fill the attempt field to
+  show how far you got.
 
 The recording is checked automatically and sent back with specific reasons if it
 does not hold up, so aim for the shape above rather than trying to guess every
@@ -141,14 +181,14 @@ the acceptance criteria — the same checks run again on whatever you produce.` 
  */
 export const RECORD_TIMEOUT_MS = 900_000;
 
-export function invokeAgent(prompt, { timeoutMs = RECORD_TIMEOUT_MS } = {}) {
+export function invokeAgent(prompt, { timeoutMs = RECORD_TIMEOUT_MS, agent = AGENT, allowedTools = 'mcp__playwright-test' } = {}) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn('claude', [
       '-p',
       '--mcp-config', MCP_CONFIG,
-      '--agent', AGENT,
+      '--agent', agent,
       '--permission-mode', 'acceptEdits',
-      '--allowed-tools', 'mcp__playwright-test',
+      '--allowed-tools', allowedTools,
     ], { stdio: ['pipe', 'pipe', 'pipe'] });
 
     let out = '', err = '';
@@ -172,6 +212,7 @@ export async function recordFeature({ featurePath, baseURL = null, critique = nu
     throw new Error(`${MCP_CONFIG} is missing — run: npx playwright init-agents --loop=claude`);
   }
   const specPath = featureToSpec(featurePath);
+  const diagnosisJson = reportPaths(featurePath).json;
   mkdirSync(dirname(resolve(specPath)), { recursive: true });
 
   const prompt = buildPrompt({
@@ -186,11 +227,15 @@ export async function recordFeature({ featurePath, baseURL = null, critique = nu
   // wrote this" from "a file from an earlier run was still lying there" — and
   // that mistake reads as success, which is the worst way to be wrong.
   const before = existsSync(specPath) ? statSync(specPath).mtimeMs : null;
+  const diagnosisBefore = existsSync(diagnosisJson) ? statSync(diagnosisJson).mtimeMs : null;
 
   const startedAt = Date.now();
-  const { stdout, stderr } = await invokeAgent(prompt);
+  const { stdout, stderr } = await invokeAgent(prompt, { allowedTools: 'mcp__playwright-test,Write' });
 
   const after = existsSync(specPath) ? statSync(specPath).mtimeMs : null;
+  const diagnosisAfter = existsSync(diagnosisJson) ? statSync(diagnosisJson).mtimeMs : null;
+  const diagnosisWritten = diagnosisAfter !== null && diagnosisAfter !== diagnosisBefore;
+  const diagnosis = diagnosisWritten ? finalizeDiagnosis(featurePath) : null;
 
   return {
     featurePath,
@@ -198,7 +243,11 @@ export async function recordFeature({ featurePath, baseURL = null, critique = nu
     project: projectOf(featurePath),
     ms: Date.now() - startedAt,
     written: after !== null && after !== before,
-    stale: after !== null && after === before,   // untouched leftover from a previous run
+    stale: after !== null && after === before,
+    diagnosisWritten,
+    diagnosisOk: diagnosis ? diagnosis.ok : null,
+    diagnosisErrors: diagnosis ? diagnosis.errors : null,
+    diagnosisJson,
     agentOutput: [stdout, stderr].filter(Boolean).join('\n'),
     agentSaid: stdout.split('\n').filter(Boolean).slice(-3).join(' ').slice(0, 400),
   };

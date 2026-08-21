@@ -7,7 +7,10 @@ blob-report/
 # is written as `cmd /c npx ...`, on POSIX as a bare command. Committing it would
 # hand the next person a config that does not run on their machine.
 .mcp.json
-.claude/agents/
+.claude/agents/*
+# The verify agent is hand-written and part of the project, unlike the planner /
+# generator / healer definitions that `setup:agents` regenerates on demand.
+!.claude/agents/verify.md
 
 # Playwright MCP scratch output (console logs, page snapshots)
 .playwright-mcp/
@@ -15,7 +18,22 @@ blob-report/
 # Written by the step reporter during a recording gate, deleted right after
 .step-report.json
 
+# Red spec list left by a failed replay for `heal` to consume
+.red-specs.json
+
 *.log
 
 # Per-attempt recording measurements. Local signal, not a build artefact.
 .recordings.jsonl
+
+# The test corpus — the .feature files and the specs recorded from them — stays
+# local. A recording only means something against the environment it was made
+# on, and this repository ships the tool, not one person's suite. The seed is
+# the exception: the generator needs it to open the application at all.
+tests/features/
+tests/run/
+!tests/run/seed.spec.ts
+reports/
+
+# Downloaded to work around a missing system library. Not part of the project.
+*.deb

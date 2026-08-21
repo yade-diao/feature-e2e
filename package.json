@@ -8,6 +8,7 @@
     "status": "node src/cli.mjs status",
     "check": "node src/cli.mjs check",
     "record": "node src/cli.mjs record",
+    "heal": "node src/cli.mjs heal",
     "replay": "node src/cli.mjs replay",
     "test": "node --test \"src/**/*.test.mjs\"",
     "setup:agents": "playwright init-agents --loop=claude"

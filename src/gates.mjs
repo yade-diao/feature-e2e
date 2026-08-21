@@ -10,12 +10,14 @@
  * Every rejection carries a critique that names what is wrong and what to do
  * instead. A gate that only says "no" wastes the most useful thing it knows.
  *
- * Order matters — cheapest first, so a recording that skipped a step is turned
- * away before a browser is spent on it.
+ * Order matters — cheapest first, and every failing gate is collected and
+ * reported together in one critique. Returning on the first fault made one fix
+ * per retry, so a spec with three faults burned three rounds; naming all of
+ * them at once lets a single retry fix all of them.
  */
 
 import { readFileSync, existsSync, unlinkSync } from 'fs';
-import { checkStepCoverage, checkStepSubstance, checkBannedPatterns, checkLiveness } from './checks.mjs';
+import { checkStepCoverage, checkStepSubstance, checkBannedPatterns, checkLiveness, checkLocatorRedundancy } from './checks.mjs';
 import { playwright } from './playwright.mjs';
 
 const STEP_REPORT = '.step-report.json';
@@ -47,34 +49,92 @@ function reject(passed, body) {
  */
 export async function staticGates(featurePath, specPath) {
   const passed = [];
+  const failures = [];
 
   const coverage = checkStepCoverage(featurePath, specPath);
-  if (!coverage.ok) {
-    return reject(passed, `${coverage.missing.length} feature step(s) have no matching test.step:\n`
+  if (coverage.ok) {
+    passed.push(`step coverage ${coverage.found}/${coverage.wanted}`);
+  } else {
+    failures.push(`${coverage.missing.length} feature step(s) have no matching test.step:\n`
       + coverage.missing.map(m => `  - ${m}`).join('\n')
       + `\n\nEvery step of the scenario must appear as \`await test.step('<step text verbatim>', ...)\`.`
       + ` The title has to match the feature text exactly.`);
   }
-  passed.push(`step coverage ${coverage.found}/${coverage.wanted}`);
 
   const banned = await checkBannedPatterns(specPath);
-  if (!banned.ok) {
-    return reject(passed, `${banned.hits.length} banned pattern(s):\n`
-      + banned.hits.map(h => `  line ${h.line}: ${h.what}\n    ${h.text.slice(0, 100)}\n    ${h.why}`).join('\n'));
+  if (banned.ok) {
+    passed.push('no banned patterns');
+  } else {
+    failures.push(`${banned.hits.length} banned pattern(s):\n`
+      + banned.hits.map(h => `  line ${h.line}: ${h.what}\n    ${h.text.slice(0, 100)}\n    ${h.why}`).join('\n')
+      + `\n\n\`.first()\`/\`.nth()\`/\`.last()\` pin to DOM order, which drifts when rows reorder or filter.`
+      + ` Remove that line — a count assertion (\`toHaveCount(n)\` or \`toBeGreaterThanOrEqual(n)\`) already proves the list is alive.`
+      + ` If you must point at one specific row, use \`getByRole\`/\`getByTestId\` with a name, never a positional index.`);
   }
-  passed.push('no banned patterns');
 
   const liveness = checkLiveness(featurePath, specPath);
-  if (!liveness.ok) {
-    return reject(passed, `${liveness.naked.length} step(s) assert only absence or an upper bound:\n`
+  if (liveness.ok) {
+    passed.push('absence assertions have liveness evidence');
+  } else {
+    failures.push(`${liveness.naked.length} step(s) assert only absence or an upper bound:\n`
       + liveness.naked.map(n => `  - ${n}`).join('\n')
       + `\n\nZero satisfies "at most N", and "nothing matches" is satisfied by nothing being there at all,`
       + ` so these pass on a blank page or a failed render. Pair each with evidence the page is alive —`
-      + ` an assertion in the same step that something which should be there is there.`);
+      + ` an assertion in the same step that something which should be there is there.`
+      + ` Use a count or text assertion (e.g. \`await expect(rows).toHaveCount(n)\`),`
+      + ` not \`.first()\`/\`.nth()\`, which the banned-pattern gate rejects.`);
   }
-  passed.push('absence assertions have liveness evidence');
+
+  const redundancy = checkLocatorRedundancy(specPath);
+  if (redundancy.ok) {
+    passed.push('every action has a stable locator or a fallback');
+  } else {
+    failures.push(`${redundancy.naked.length} action(s) are located in only one way, and that one way will drift:\n`
+      + redundancy.naked.map(n => `  line ${n.line}: ${n.method}() on "${n.chain}"`).join('\n')
+      + `\n\nAn action that stops matching fails the whole test — every assertion after it never runs.`
+      + ` Give each action a fallback with .or() (getByTestId('x').or(getByRole('button', { name: '...' }))),`
+      + ` or locate it purely by role / label / placeholder so it does not depend on ids or wording.`);
+  }
+
+  if (failures.length) {
+    return reject(passed, failures.join('\n\n'));
+  }
 
   return { ok: true, passed, critique: null };
+}
+
+/**
+ * Which spec files a run left red.
+ *
+ * `status` is Playwright's own verdict string. Only failed and timedOut count
+ * as red — skipped, interrupted and expected-to-fail do not, because a spec in
+ * any of those states has no broken locator to heal.
+ */
+export function redSpecsFrom(tests) {
+  return [...new Set(
+    tests.filter(t => t.status === 'failed' || t.status === 'timedOut').map(t => t.file).filter(Boolean),
+  )];
+}
+
+/**
+ * The reason a replay went red, most specific first.
+ *
+ * The custom reporter replaces Playwright's console output, so the failure
+ * detail survives only in the step/test records it wrote — never on
+ * stdout/stderr. A critique that says only "it does not replay" gives the
+ * producer nothing to fix, so the step and test errors are named here.
+ */
+function describeFailures(tests, steps) {
+  const lines = [];
+  for (const s of steps) {
+    if (!s.ok && s.error) lines.push(`step "${s.title}": ${s.error.split('\n')[0]}`);
+  }
+  for (const t of tests) {
+    if ((t.status === 'failed' || t.status === 'timedOut') && t.error) {
+      lines.push(`${t.file ?? '?'} (${t.status}): ${t.error.split('\n')[0]}`);
+    }
+  }
+  return lines.join('\n');
 }
 
 /**
@@ -94,27 +154,34 @@ export function replayGate(specPaths) {
   const run = playwright(['test', ...paths, '--reporter=./src/reporter.mjs'],
     { env: { ...process.env, STEP_REPORT }, stdio: 'pipe', encoding: 'utf8' });
 
-  let recorded = [];
+  let recorded = { steps: [], tests: [] };
   try { recorded = JSON.parse(readFileSync(STEP_REPORT, 'utf8')); } catch { /* handled below */ }
   if (existsSync(STEP_REPORT)) unlinkSync(STEP_REPORT);
+  // The reporter writes `{ steps, tests }`. `steps` feeds the substance gate;
+  // `tests` names which spec files went red, so healing can touch only those.
+  const steps = Array.isArray(recorded) ? recorded : (recorded.steps ?? []);
+  const tests = Array.isArray(recorded) ? [] : (recorded.tests ?? []);
 
   if (run.status !== 0) {
-    const output = `${run.stdout ?? ''}${run.stderr ?? ''}`;
-    return reject(passed, `the recorded spec does not replay:\n\n${output.slice(-2500)}`
+    // The custom reporter swallows Playwright's own output, so the reason lives
+    // in the step/test records above — stdout/stderr is only the fallback.
+    const detail = describeFailures(tests, steps) || `${run.stdout ?? ''}${run.stderr ?? ''}`.trim();
+    const redSpecs = redSpecsFrom(tests);
+    return { ...reject(passed, `the recorded spec does not replay:\n\n${detail.slice(0, 2500)}`
       + `\n\nThis is the run failing against the live page, so the problem is in the recording itself`
       + ` — a locator that was never really there, a wait that was never really needed, or a step`
-      + ` performed in the wrong order.`);
+      + ` performed in the wrong order.`), redSpecs };
   }
   passed.push('replays green');
 
   // Playwright exiting 0 is too weak on its own: a skipped test, a test with no
   // assertions and an empty test.step all exit 0. Seeing zero steps means the
   // reporter never ran, which is a tool failure, not a passing suite.
-  if (!recorded.length) {
+  if (!steps.length) {
     return { ok: false, passed, critique: null,
       inconclusive: 'the step reporter produced nothing — Playwright exited 0 but no test.step was observed' };
   }
-  const substance = checkStepSubstance(recorded);
+  const substance = checkStepSubstance(steps);
   if (!substance.ok) {
     return reject(passed, `${substance.empty.length} test.step ran but performed no action, assertion or attachment:\n`
       + substance.empty.map(e => `  - ${e.title}`).join('\n')

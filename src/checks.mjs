@@ -206,3 +206,149 @@ export function checkLiveness(featurePath, specPath) {
   const unique = [...new Set(naked)];
   return { ok: unique.length === 0, naked: unique };
 }
+
+/**
+ * Gate 6 (audit) — strings the spec names that the feature never authorised.
+ *
+ * A feature step quotes the labels it cares about verbatim — `opens the "教育"
+ * channel` — and those quoted strings are the anchors a recorder is allowed to
+ * use. Anything else the spec names that reads as page content (CJK text) is
+ * data read off the live page while recording: a headline, a product name, a
+ * placeholder. That is the assertion that goes red tomorrow because the content
+ * changed, not because anything regressed — the failure the README's "Known
+ * limitation" calls out.
+ *
+ * This is deliberately an audit, not a hard gate. The signal — CJK text that is
+ * not one of the feature's own quoted anchors — is strong but not proof, and a
+ * false rejection here would block a recorder that did nothing wrong. List, do
+ * not reject: the human decides whether each hit is a real data assertion.
+ */
+export function checkSemanticStability(featurePath, specPath) {
+  const anchors = new Set();
+  for (const step of allSteps(featurePath)) {
+    anchors.add(normalise(step.full));   // the step title, verbatim
+    for (const m of step.full.matchAll(/["“]([^"”]+)["”]/g)) {
+      anchors.add(normalise(m[1]));      // quoted labels the feature authorised
+    }
+  }
+
+  const src = readFileSync(specPath, 'utf8');
+  const bare = src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
+  const flagged = new Set();
+  for (const m of bare.matchAll(/(['"`])((?:\\.|(?!\1)[^\\])*)\1/g)) {
+    const n = normalise(decodeStringLiteral(m[2]));
+    if (!n) continue;
+    if (anchors.has(n)) continue;
+    if (!/\p{Script=Han}/u.test(n)) continue;   // CJK is the page-content signal
+    flagged.add(n);
+  }
+  return { ok: flagged.size === 0, flagged: [...flagged] };
+}
+
+/**
+ * Gate 7 (audit) — locators that will break on the next build.
+ *
+ * A recorded locator pins whatever it was made from. Some sources are stable —
+ * role, label, a hand-written testid; others change on every rebuild or the next
+ * refactor: CSS-module hashes, styled-components / emotion class names, and
+ * testids that embed an id or index. A spec that names one goes red tomorrow for
+ * a reason that has nothing to do with a regression.
+ *
+ * Like checkSemanticStability, this is an audit, not a hard gate — regexes over
+ * generated class names can misfire, and a false reject would block a recorder
+ * that did nothing wrong. List, do not reject.
+ */
+
+/** Generated-class signatures that change on every build. */
+const GENERATED_CLASS = [
+  /[\w-]+__[A-Za-z0-9]{5,}/,        // CSS modules: .Module_x__ab12cd
+  /(?:^|[.\s])sc-[A-Za-z0-9]{5,}/,  // styled-components: .sc-bdVaJa
+  /(?:^|[.\s])css-[a-z0-9]{5,}/,    // emotion: .css-1vz4ukc
+];
+
+export function checkLocatorRobustness(specPath) {
+  const src = readFileSync(specPath, 'utf8');
+  const bare = src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
+  const flagged = new Set();
+  for (const m of bare.matchAll(/(['"`])((?:\\.|(?!\1)[^\\])*)\1/g)) {
+    const n = decodeStringLiteral(m[2]);
+    if (!n) continue;
+    if (GENERATED_CLASS.some(re => re.test(n))) flagged.add(n);
+  }
+  return { ok: flagged.size === 0, flagged: [...flagged] };
+}
+
+/**
+ * Gate 4 — an action locator with no fallback.
+ *
+ * A locator that drives an action (click, fill, select…) fails the whole test
+ * when it stops matching: the step throws and every assertion after it never
+ * runs. So an action must survive a rebuild — either by carrying a `.or()`
+ * backup chain, or by being pure accessibility semantics (role / label /
+ * placeholder), which does not depend on ids, classes or wording.
+ *
+ * Assertions are deliberately NOT checked. An assertion locator that fails is
+ * the point — it is the "this business logic does not hold" signal, and giving
+ * it a fallback would let it match some near element and go green while the
+ * component it was watching is gone. Redundancy here prevents a false red;
+ * redundancy on an assertion would cause a false green.
+ */
+
+/** Action methods on a Locator — the ones that throw when the target is gone. */
+const ACTION_METHODS = [
+  'click', 'dblclick', 'fill', 'clear', 'press', 'type', 'selectOption',
+  'check', 'uncheck', 'hover', 'dragTo', 'setInputFiles',
+];
+
+/**
+ * Locator sources that drift: visible text (wording changes), alt text, title
+ * attributes, and raw CSS. `getByTestId` is deliberately absent — a stable,
+ * hand-written testid is the developer's contract with the suite, not a rebuild
+ * artifact, so it is treated as stable (matching the recording prompt's
+ * locator preference order).
+ */
+const DRIFTABLE = /getByText|getByAltText|getByTitle|\.locator\s*\(/;
+
+const lineOf = (text, index) => text.slice(0, index).split('\n').length;
+const collapse = s => s.replace(/\s+/g, ' ').trim();
+
+/** Does this locator chain need a fallback and lack one? */
+function needsRedundancy(chain) {
+  if (chain.includes('.or(')) return false;   // a fallback is already there
+  return DRIFTABLE.test(chain);               // drifts, and nothing backs it up
+}
+
+export function checkLocatorRedundancy(specPath) {
+  const src = readFileSync(specPath, 'utf8');
+  const bare = src.replace(/\/\*[\s\S]*?\*\//g, ' ').replace(/\/\/[^\n]*/g, ' ');
+  const actions = ACTION_METHODS.join('|');
+  const naked = [];
+
+  // Inline chain — the generator's usual shape:
+  //   await page.getByTestId('search-input').click();
+  const inlineRe = new RegExp(`(page\\.(?:getBy\\w+|locator)\\([^;]*?)\\.(${actions})\\s*\\(`, 'g');
+  for (const m of bare.matchAll(inlineRe)) {
+    if (needsRedundancy(m[1])) {
+      naked.push({ line: lineOf(bare, m.index), method: m[2], chain: collapse(m[1]) });
+    }
+  }
+
+  // Variable form — collected first so the action can be judged by the locator
+  // it was assigned:
+  //   const input = page.getByTestId('search-input');
+  //   await input.click();
+  const vars = new Map();
+  const varRe = /\b(?:const|let)\s+([A-Za-z_$][\w$]*)\s*=\s*(page\.(?:getBy\w+|locator)\([^;]*?);/g;
+  for (const m of bare.matchAll(varRe)) vars.set(m[1], m[2]);
+  if (vars.size) {
+    const varActionRe = new RegExp(`\\b(${[...vars.keys()].join('|')})\\.(${actions})\\s*\\(`, 'g');
+    for (const m of bare.matchAll(varActionRe)) {
+      const chain = vars.get(m[1]);
+      if (chain && needsRedundancy(chain)) {
+        naked.push({ line: lineOf(bare, m.index), method: m[2], chain: collapse(chain) });
+      }
+    }
+  }
+
+  return { ok: naked.length === 0, naked };
+}
