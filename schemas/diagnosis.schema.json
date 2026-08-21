@@ -1,0 +1,126 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://example.com/schemas/diagnosis.schema.json",
+  "title": "Diagnosis report",
+  "description": "The structured artifact produced when a piece of business logic cannot be verified. Verdict categories and evidence types are closed enums on purpose — the agent must choose, it may not free-associate. The same shape is produced by both the verify agent (a step it could not verify) and the healer agent (a locator it could not repair). src/diagnose.mjs is the executable form of these constraints.",
+  "type": "object",
+  "required": [
+    "report_version",
+    "id",
+    "created_at",
+    "stage",
+    "feature",
+    "diagnoses"
+  ],
+  "properties": {
+    "report_version": {
+      "const": "1.0"
+    },
+    "id": {
+      "type": "string",
+      "description": "Unique id for this report, traceable to a run."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "stage": {
+      "enum": ["verify", "heal"],
+      "description": "Which stage failed: verify (the step could not be verified) or heal (the locator could not be repaired)."
+    },
+    "feature": {
+      "type": "string",
+      "description": "Feature path under tests/features."
+    },
+    "diagnoses": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/definitions/diagnosis" }
+    }
+  },
+  "definitions": {
+    "diagnosis": {
+      "type": "object",
+      "required": ["scenario", "step", "verdict", "attempt", "evidence"],
+      "properties": {
+        "scenario": { "type": "string" },
+        "step": {
+          "type": "string",
+          "description": "The feature step that could not be verified, verbatim."
+        },
+        "verdict": { "$ref": "#/definitions/verdict" },
+        "attempt": { "$ref": "#/definitions/attempt" },
+        "evidence": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/evidence" }
+        },
+        "suggested_fix": { "type": "string" }
+      }
+    },
+    "verdict": {
+      "type": "object",
+      "required": ["category", "summary", "confidence"],
+      "properties": {
+        "category": {
+          "enum": ["frontend", "backend", "environment", "unverifiable"],
+          "description": "Whose fault it is. 'unverifiable' is a legitimate answer when the evidence does not support a frontend/backend attribution."
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "description": "One human sentence: what is wrong."
+        },
+        "confidence": {
+          "enum": ["high", "medium", "low"],
+          "description": "How sure the agent is of the attribution. 'low' is allowed and encouraged over a fake 'high'."
+        }
+      }
+    },
+    "attempt": {
+      "type": "object",
+      "required": ["steps_completed", "obstacle"],
+      "properties": {
+        "steps_completed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "last_action": { "type": "string" },
+        "obstacle": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Where the verification got stuck."
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "enum": ["network", "console", "snapshot", "dom", "assertion"],
+          "description": "The kind of evidence collected."
+        },
+        "target": {
+          "type": "string",
+          "description": "The request URL for network, the error location for console, the file path for snapshot."
+        },
+        "status": {
+          "type": ["integer", "null"],
+          "description": "HTTP status for network evidence."
+        },
+        "finding": {
+          "type": "string",
+          "description": "What the evidence shows."
+        },
+        "captured": {
+          "type": "string",
+          "description": "Path to a saved artifact (screenshot, trace)."
+        },
+        "observation": {
+          "type": "string",
+          "description": "What the agent observed on the page."
+        }
+      }
+    }
+  }
+}

@@ -4,7 +4,8 @@
  *
  *   node src/cli.mjs status                   pairing between features and specs
  *   node src/cli.mjs check  [feature|project] static gates over already-recorded specs
- *   node src/cli.mjs record [feature|project] agent walks the steps, recorder writes the spec
+ *   node src/cli.mjs record [feature|project] verify each step; recorder writes the spec
+ *   node src/cli.mjs heal   [feature|project] repair a spec whose locators stopped matching
  *   node src/cli.mjs replay [feature|project] run the recorded specs
  *
  * Exit codes:
@@ -17,14 +18,23 @@
  * otherwise a red CI result stops meaning "the application regressed".
  */
 
-import { existsSync } from 'fs';
-import { FEATURE_DIR, listFeatures, pairing } from './paths.mjs';
+import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
+import { FEATURE_DIR, listFeatures, pairing, specToFeature } from './paths.mjs';
 import { recordFeature } from './recorder.mjs';
+import { healFeature } from './healer.mjs';
 import { runGates, staticGates, replayGate } from './gates.mjs';
+import { checkSemanticStability, checkLocatorRobustness } from './checks.mjs';
 import { logAttempt, summary } from './journal.mjs';
 
 const [command = 'status', target = null] = process.argv.slice(2).filter(a => !a.startsWith('--'));
 const BASE_URL = process.env.BASE_URL ?? null;
+
+/**
+ * Where a failed replay leaves the list of red spec files for `heal` to read.
+ * Written on red, cleared at the start of every replay — so it never goes stale
+ * and healing never re-runs a spec that is already green.
+ */
+const RED_SPECS_FILE = '.red-specs.json';
 
 /** A target is a feature path, a project name, or nothing (meaning: all). */
 function resolveTargets(t) {
@@ -86,7 +96,7 @@ const MAX_ATTEMPTS = 3;
 
 /** Gate names in the order runGates applies them — used to label a rejection. */
 const GATE_ORDER = [
-  'step coverage', 'banned patterns', 'liveness', 'replay', 'step substance',
+  'step coverage', 'banned patterns', 'liveness', 'locator redundancy', 'replay', 'step substance',
 ];
 
 async function cmdRecord() {
@@ -113,11 +123,21 @@ async function cmdRecord() {
       }
 
       if (!result.written) {
-        console.log(result.stale
-          ? `    FAILED  ${result.specPath} was not touched - this is a leftover from an earlier run`
-          : `    FAILED  the agent produced no ${result.specPath}`);
-        console.log(`    agent said: ${result.agentSaid || '(nothing)'}`);
-        break;   // no artifact at all: a critique would have nothing to critique
+        if (result.diagnosisWritten) {
+          if (result.diagnosisOk) {
+            console.log(`    UNVERIFIED  ${result.diagnosisJson}`);
+            console.log('    the business logic could not be verified — read the diagnosis report');
+          } else {
+            console.log(`    INVALID REPORT  ${result.diagnosisJson} — the agent produced a report the schema rejects:`);
+            for (const e of result.diagnosisErrors) console.log(`      - ${e}`);
+          }
+        } else {
+          console.log(result.stale
+            ? `    FAILED  ${result.specPath} was not touched - this is a leftover from an earlier run`
+            : `    FAILED  the agent produced no ${result.specPath}`);
+          console.log(`    agent said: ${result.agentSaid || '(nothing)'}`);
+        }
+        break;   // no spec: a diagnosis is a result, not a retry, and no artifact has nothing to critique
       }
       console.log(`    wrote ${result.specPath} (${(result.ms / 1000).toFixed(0)}s)`);
 
@@ -183,6 +203,8 @@ async function cmdCheck() {
 
   console.log(`checking ${specs.length} spec(s) — static gates only, no browser\n`);
   let bad = 0;
+  let stale = 0;
+  let brittle = 0;
   for (const { feature, spec } of specs) {
     const verdict = await staticGates(feature, spec);
     if (verdict.ok) {
@@ -192,8 +214,22 @@ async function cmdCheck() {
       console.log(`  FAIL  ${spec}`);
       console.log(verdict.critique.split('\n').map(l => '          ' + l).join('\n'));
     }
+    const sem = checkSemanticStability(feature, spec);
+    if (sem.flagged.length) {
+      stale++;
+      console.log(`  note  ${spec} — ${sem.flagged.length} unauthorised data string(s), may go stale with the content:`);
+      for (const f of sem.flagged) console.log(`          - ${f}`);
+    }
+    const loc = checkLocatorRobustness(spec);
+    if (loc.flagged.length) {
+      brittle++;
+      console.log(`  note  ${spec} — ${loc.flagged.length} generated-class locator(s), will break on the next build:`);
+      for (const f of loc.flagged) console.log(`          - ${f}`);
+    }
   }
   console.log(bad ? `\n${bad} spec(s) would be rejected by the current rules` : '\nall specs pass the static gates');
+  if (stale) console.log(`${stale} spec(s) contain potentially stale data assertions — review the "note" lines above`);
+  if (brittle) console.log(`${brittle} spec(s) use generated-class locators — they will break on the next build`);
   return bad ? 1 : 0;
 }
 
@@ -217,12 +253,17 @@ function cmdReplay() {
   }
   console.log(`replaying ${specs.length} spec(s) (pure Playwright, no model calls)\n`);
 
+  // A fresh run supersedes whatever the last one left behind.
+  if (existsSync(RED_SPECS_FILE)) unlinkSync(RED_SPECS_FILE);
+
   const verdict = replayGate(specs);
   if (verdict.inconclusive) {
     console.log(`\nINCONCLUSIVE  ${verdict.inconclusive}`);
     return 2;
   }
   if (!verdict.ok) {
+    const red = verdict.redSpecs ?? [];
+    if (red.length) writeFileSync(RED_SPECS_FILE, JSON.stringify(red) + '\n');
     console.log(`\nFAILED\n${verdict.critique}`);
     return 1;
   }
@@ -230,15 +271,73 @@ function cmdReplay() {
   return 0;
 }
 
+/**
+ * Heal specs whose locators stopped matching.
+ *
+ * The healer agent re-locates each failing element against the live page and
+ * rewrites the locator redundantly, then the spec is replayed deterministically
+ * to confirm. A spec the page has changed beyond re-location becomes a diagnosis
+ * report — the same artifact a verification failure produces.
+ */
+/** The specs a previous replay marked red, if any — read once, then gone. */
+function readRedSpecs() {
+  if (!existsSync(RED_SPECS_FILE)) return null;
+  try {
+    const list = JSON.parse(readFileSync(RED_SPECS_FILE, 'utf8'));
+    if (Array.isArray(list) && list.length) return list;
+  } catch { /* stale or malformed — ignore and fall back to every feature */ }
+  return null;
+}
+
+async function cmdHeal() {
+  // A replay that just went red leaves a list of red specs; heal only those,
+  // rather than replaying every spec again to find the one that broke. Without
+  // that list (e.g. `heal` run by hand) fall back to every feature.
+  // An explicit target always wins; the red list only guides the unattended CI run.
+  const red = target ? null : readRedSpecs();
+  const features = red ? red.map(specToFeature) : resolveTargets(target);
+  console.log(`healing ${features.length} feature(s)${red ? ' (the specs that went red)' : ''}\n`);
+  let failed = 0;
+
+  for (const feature of features) {
+    console.log(`  ${feature}`);
+    const result = await healFeature({ featurePath: feature, baseURL: BASE_URL });
+    if (result.alreadyGreen) {
+      console.log(`    ok  ${result.specPath} already replays green`);
+      continue;
+    }
+    if (result.ok) {
+      console.log(`    healed  ${result.specPath}`);
+    } else if (result.diagnosisJson) {
+      if (result.diagnosisOk) {
+        console.log(`    UNHEALABLE  ${result.diagnosisJson}`);
+        console.log('    the page changed beyond re-location — read the diagnosis report');
+      } else {
+        console.log(`    INVALID REPORT  ${result.diagnosisJson} — the agent produced a report the schema rejects:`);
+        for (const e of result.diagnosisErrors) console.log(`      - ${e}`);
+      }
+    } else if (result.specChanged) {
+      console.log(`    STILL RED  ${result.specPath} changed but still does not replay`);
+    } else {
+      console.log(`    FAILED  the healer produced no change`);
+      if (result.agentSaid) console.log(`    agent said: ${result.agentSaid}`);
+    }
+    if (!result.ok) failed++;
+  }
+
+  return failed ? 1 : 0;
+}
+
 const commands = {
   status: cmdStatus,
   check: cmdCheck,
   record: cmdRecord,
+  heal: cmdHeal,
   replay: cmdReplay,
 };
 
 if (!commands[command]) {
-  console.log('usage: node src/cli.mjs <status|check|record|replay> [feature or project]');
+  console.log('usage: node src/cli.mjs <status|check|record|heal|replay> [feature or project]');
   process.exit(2);
 }
 process.exit((await commands[command]()) ?? 0);
