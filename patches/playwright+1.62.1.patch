@@ -1,0 +1,13 @@
+diff --git a/node_modules/playwright/lib/mcp/test/browserBackend.js b/node_modules/playwright/lib/mcp/test/browserBackend.js
+index db9414d..f5bfaa3 100644
+--- a/node_modules/playwright/lib/mcp/test/browserBackend.js
++++ b/node_modules/playwright/lib/mcp/test/browserBackend.js
+@@ -36,7 +36,7 @@ var import_crypto = __toESM(require("crypto"));
+ const { stripAnsiEscapes } = require("playwright-core/lib/coreBundle").iso;
+ function createCustomMessageHandler(testInfo, context) {
+   let backend;
+-  const config = { capabilities: ["testing"] };
++  const config = { capabilities: ["testing"], timeouts: { action: 2e4, navigation: 3e4, expect: 15e3 }, ...(process.env.PLAYWRIGHT_MCP_OUTPUT_DIR ? { outputDir: process.env.PLAYWRIGHT_MCP_OUTPUT_DIR } : {}) };
+   let tools;
+   context.once("close", () => {
+     void backend?.dispose();

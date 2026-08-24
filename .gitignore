@@ -17,7 +17,11 @@ blob-report/
 # commit that claimed to have healed a locator.
 specs/
 
-# Playwright MCP scratch output (console logs, page snapshots)
+# Browser scratch output (console logs, page snapshots), one subtree per
+# feature — see recorder.mjs's mcpOutputDir. Local signal, like reports/.
+logs/
+# Where the MCP server writes the same thing when PLAYWRIGHT_MCP_OUTPUT_DIR is
+# unset — an unpatched tree, or a server started outside the recorder.
 .playwright-mcp/
 
 # Written by the step reporter during a recording gate, deleted right after
@@ -38,7 +42,12 @@ specs/
 tests/features/
 tests/run/
 !tests/run/seed.spec.ts
+# The same corpus, one directory above the rule that holds it.
+/*.feature
 reports/
 
 # Downloaded to work around a missing system library. Not part of the project.
 *.deb
+
+# macOS directory metadata. Nothing to do with this project.
+.DS_Store

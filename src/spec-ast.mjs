@@ -118,6 +118,45 @@ export function specStrings(specPath) {
   return out;
 }
 
+/**
+ * The spec's source up through the last `test.step` that ends before
+ * `cutoffLine`, closed the same way every recorded spec is nested
+ * (`test.describe` -> `test` -> steps) so the result parses and runs on its
+ * own — same shape as `tests/run/seed.spec.ts`, just with a prefix of real
+ * steps already inside it.
+ *
+ * This is what lets a retry replay the part that already worked — for real,
+ * with Playwright, no model involved — and hand the agent only the part the
+ * gates actually objected to, instead of re-driving the whole feature again.
+ *
+ * @returns the truncated source, or null if no step ends before cutoffLine
+ *          (nothing safe to keep — the retry gets the ordinary blank seed).
+ */
+export function truncateBeforeLine(specPath, cutoffLine) {
+  const { source, ast } = tree(specPath);
+  let lastEnd = null;
+  for (const node of walk(ast)) {
+    if (node.type !== 'CallExpression') continue;
+    const callee = node.callee;
+    if (callee.type !== 'MemberExpression' || callee.computed) continue;
+    if (callee.property.type !== 'Identifier' || callee.property.name !== 'step') continue;
+    if (callee.object.type !== 'Identifier' || callee.object.name !== 'test') continue;
+    // The step must be entirely clear of the cutoff — checking only where it
+    // *starts* would let a step that straddles the cutoff (starts before it,
+    // but its body runs past it, which is exactly where the first offending
+    // line tends to live) through as "safe", freezing the very thing the
+    // cutoff was computed to exclude into every future retry's seed.
+    if (node.loc.end.line >= cutoffLine) continue;
+    // The call sits in `await test.step(...);` — include the semicolon so the
+    // truncated source doesn't end mid-statement.
+    let end = node.range[1];
+    if (source[end] === ';') end += 1;
+    if (lastEnd === null || end > lastEnd) lastEnd = end;
+  }
+  if (lastEnd === null) return null;
+  return `${source.slice(0, lastEnd)}\n  });\n});\n`;
+}
+
 /** Locator methods whose result depends on wording, markup or raw CSS. */
 const DRIFTABLE_SOURCE = new Set(['getByText', 'getByAltText', 'getByTitle', 'locator']);
 

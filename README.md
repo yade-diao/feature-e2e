@@ -319,6 +319,20 @@ system. Across a WSL/Windows boundary the client sends a POSIX cwd that the
 server resolves against a drive letter, and `--config` cannot repair it — the
 server takes its root from the client's cwd first.
 
+**The agent hangs for the entire timeout on one step, CPU idle, no new snapshot.**
+`run-test-mcp-server` (`node_modules/playwright/lib/mcp/test/browserBackend.js`) builds its
+MCP backend config with no `timeouts` field, so every interactive tool call —
+`browser_click`, `browser_type`, `browser_hover`, all of them — runs with
+`timeout: undefined`. Playwright's own actionability wait normally falls back to a
+built-in default when that happens, but against a component that never settles
+(a UI5 combobox re-rendering on every frame, for instance) that wait can hang
+indefinitely, with nothing left to time it out except the outer per-feature
+budget in `recorder.mjs`. `patches/playwright+1.62.1.patch` (applied automatically
+via `postinstall`, see `patch-package`) fixes this at the source: it gives the
+MCP backend explicit `action`/`navigation`/`expect` timeouts, so a step that
+cannot complete fails in seconds and the agent gets to retry or diagnose,
+instead of the whole recording silently burning its budget on one stuck click.
+
 **The browser will not start (`libnspr4.so: cannot open shared object file`).**
 `npx playwright install-deps chromium` needs root. Without it, download the
 packages and extract them into your home directory, then point `LD_LIBRARY_PATH`

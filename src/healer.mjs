@@ -17,7 +17,7 @@ import { existsSync, statSync } from 'fs';
 import { featureToSpec } from './paths.mjs';
 import { reportPaths, finalizeDiagnosis } from './diagnose.mjs';
 import { replayGate } from './gates.mjs';
-import { invokeAgent } from './recorder.mjs';
+import { invokeAgent, mcpOutputDir } from './recorder.mjs';
 
 const AGENT = 'playwright-test-healer';
 const MCP_CONFIG = '.mcp.json';
@@ -47,12 +47,20 @@ Heal it the way the recorder would have recorded it:
    or CSS needs a .or() fallback.
 5. If the page itself changed and the business logic can no longer be verified —
    the element is gone, or the data is wrong — do not force a locator onto it.
-   Write a diagnosis report instead: one JSON object at ${reportJson},
-   conforming to schemas/diagnosis.schema.json, with stage "heal". The closed
-   enums are the same as a verification report: verdict.category is one of
+   Write a diagnosis report instead, at ${reportJson}, conforming to
+   schemas/diagnosis.schema.json. It is an envelope, not a flat object —
+   \`scenario\`/\`step\`/\`verdict\`/\`attempt\`/\`evidence\` each live one level
+   down, inside a \`diagnoses\` array, alongside top-level \`report_version\`
+   ("1.0"), \`id\`, \`created_at\` and \`stage\` ("heal"):
+   \`{ report_version, id, created_at, stage: "heal", feature, diagnoses: [
+   { scenario, step, verdict: { category, summary, confidence }, attempt:
+   { steps_completed, obstacle, last_action? }, evidence: [...] } ] }\`.
+   \`attempt\` is an object — \`steps_completed\` and \`obstacle\` are both
+   required, not a paragraph describing what you tried. The closed enums are
+   the same as a verification report: verdict.category is one of
    frontend|backend|environment|unverifiable, each evidence.type one of
    network|console|snapshot|dom|assertion. Attribute from evidence you actually
-   observed, and fill the attempt field to show what you tried.
+   observed.
 `;
 }
 
@@ -89,6 +97,7 @@ export async function healFeature({ featurePath, baseURL = null, failure = null 
   const { stdout, stderr } = await invokeAgent(prompt, {
     agent: AGENT,
     allowedTools: 'mcp__playwright-test,Edit,Write',
+    outputDir: mcpOutputDir(specPath),
   });
 
   const after = statSync(specPath).mtimeMs;

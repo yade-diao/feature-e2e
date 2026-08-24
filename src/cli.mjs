@@ -19,8 +19,10 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
+import { dirname, join } from 'path';
 import { FEATURE_DIR, featureToSpec, listFeatures, pairing, specToFeature } from './paths.mjs';
 import { recordFeature, discardRejectedSpec } from './recorder.mjs';
+import { truncateBeforeLine } from './spec-ast.mjs';
 import { healFeature } from './healer.mjs';
 import { runGates, staticGates, replayGate } from './gates.mjs';
 import { checkSemanticStability, checkLocatorRobustness } from './checks.mjs';
@@ -101,6 +103,20 @@ async function cmdRecord() {
 
   const runId = Date.now().toString(36);
 
+  // A killed process (Ctrl+C, a CI job cancelled, a supervisor timeout above
+  // this one) skips the ordinary end-of-feature cleanup below, and a spec an
+  // attempt was still writing when the signal landed is left on disk exactly
+  // as a passing recording would be. The next run then reads it as "the spec
+  // as it stood before this run" and either restores or discards *that*,
+  // silently laundering a half-written file into "the previous good spec".
+  // Whatever is pending when a signal arrives is exactly what the ordinary
+  // path would have cleaned up, so run the same function and exit the same
+  // way a normal rejection would have.
+  let pendingCleanup = null;
+  const onSignal = () => { pendingCleanup?.(); process.exit(1); };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+
   for (const feature of features) {
     console.log(`  ${feature}`);
     let critique = null;
@@ -113,12 +129,23 @@ async function cmdRecord() {
     const specPath = featureToSpec(feature);
     const specBefore = existsSync(specPath) ? readFileSync(specPath) : null;
 
+    // A retry that starts from the blank seed re-drives every step the agent
+    // already got right — minutes and a model call apiece — just to reach the
+    // one the critique names. Written next to the spec so it never lingers as
+    // a stray *.spec.ts if the loop exits early; removed after every attempt.
+    let resumeSeed = null;
+    const resumeSeedPath = join(dirname(specPath), '.resume-seed.spec.ts');
+    pendingCleanup = () => {
+      discardRejectedSpec(specPath, specBefore);
+      if (existsSync(resumeSeedPath)) unlinkSync(resumeSeedPath);
+    };
+
     for (let attempt = 1; attempt <= MAX_ATTEMPTS && !done; attempt++) {
-      if (attempt > 1) console.log(`    retry ${attempt}/${MAX_ATTEMPTS} with the critique above`);
+      if (attempt > 1) console.log(`    retry ${attempt}/${MAX_ATTEMPTS} with the critique above${resumeSeed ? ' (replaying the verified prefix)' : ''}`);
 
       let result;
       try {
-        result = await recordFeature({ featurePath: feature, baseURL: BASE_URL, critique });
+        result = await recordFeature({ featurePath: feature, baseURL: BASE_URL, critique, resumeSeed });
       } catch (e) {
         console.log(`    FAILED  ${e.message.split('\n')[0]}`);
         break;   // an exception here is the harness failing, not the recording
@@ -168,7 +195,24 @@ async function cmdRecord() {
 
       console.log(`    rejected:\n${verdict.critique.split('\n').map(l => '      ' + l).join('\n')}`);
       critique = verdict.critique;
+
+      // Keep whatever prefix is still safe — everything up to the earliest
+      // line a gate objected to — so the next attempt replays it instead of
+      // re-verifying it. `earliestLine === null` means no gate reported a
+      // line (or every step is implicated), and the retry falls back to the
+      // blank seed, same as before this existed.
+      resumeSeed = null;
+      if (verdict.earliestLine != null) {
+        const truncated = truncateBeforeLine(result.specPath, verdict.earliestLine);
+        if (truncated) {
+          writeFileSync(resumeSeedPath, truncated);
+          resumeSeed = resumeSeedPath;
+        }
+      }
+      if (!resumeSeed && existsSync(resumeSeedPath)) unlinkSync(resumeSeedPath);
     }
+
+    if (existsSync(resumeSeedPath)) unlinkSync(resumeSeedPath);
 
     if (!done) {
       failed++;
@@ -179,7 +223,11 @@ async function cmdRecord() {
         console.log(`    discarded ${specPath} — a spec the gates turned away is not a recording`);
       }
     }
+    pendingCleanup = null;
   }
+
+  process.off('SIGINT', onSignal);
+  process.off('SIGTERM', onSignal);
 
   const s = summary();
   if (s.runs) {

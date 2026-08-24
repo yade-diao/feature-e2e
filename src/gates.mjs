@@ -19,6 +19,30 @@
 import { readFileSync, existsSync, unlinkSync } from 'fs';
 import { checkStepCoverage, checkStepSubstance, checkBannedPatterns, checkLiveness, checkLocatorRedundancy } from './checks.mjs';
 import { playwright } from './playwright.mjs';
+import { testSteps } from './spec-ast.mjs';
+
+/**
+ * The first line any gate objected to, so a retry can replay the untouched
+ * prefix instead of re-driving the whole feature through the agent again.
+ *
+ * `liveness` reports step titles, not lines — the same shape `checkLiveness`
+ * already returns — so it is resolved back to a line through the spec's own
+ * `test.step` titles, the same title text `checkStepCoverage` matches on.
+ */
+function earliestLine(specPath, { banned, liveness, redundancy }) {
+  const lines = [
+    ...banned.hits.map(h => h.line),
+    ...redundancy.naked.map(n => n.line),
+  ];
+  if (liveness.naked.length) {
+    const byTitle = new Map(testSteps(specPath).map(s => [s.title, s.line]));
+    for (const title of liveness.naked) {
+      const line = byTitle.get(title);
+      if (line !== undefined) lines.push(line);
+    }
+  }
+  return lines.length ? Math.min(...lines) : null;
+}
 
 const STEP_REPORT = '.step-report.json';
 
@@ -107,10 +131,11 @@ export async function staticGates(featurePath, specPath) {
   }
 
   if (failures.length) {
-    return reject(passed, failures.join('\n\n'), failed);
+    return { ...reject(passed, failures.join('\n\n'), failed),
+      earliestLine: earliestLine(specPath, { banned, liveness, redundancy }) };
   }
 
-  return { ok: true, passed, failed: [], critique: null };
+  return { ok: true, passed, failed: [], critique: null, earliestLine: null };
 }
 
 /**
@@ -177,10 +202,21 @@ export function replayGate(specPaths) {
     // in the step/test records above — stdout/stderr is only the fallback.
     const detail = describeFailures(tests, steps) || `${run.stdout ?? ''}${run.stderr ?? ''}`.trim();
     const redSpecs = redSpecsFrom(tests);
+    // Same reasoning as the static gates' earliestLine: a step that failed to
+    // replay names itself in `steps[].title`, the same title text a test.step
+    // is written with, so a retry can still replay the untouched prefix
+    // instead of re-driving steps that never had anything wrong with them.
+    const failedTitles = new Set(steps.filter(s => !s.ok && s.error).map(s => s.title));
+    let earliestLine = null;
+    if (failedTitles.size && specPaths.length === 1) {
+      const byTitle = new Map(testSteps(specPaths[0]).map(s => [s.title, s.line]));
+      const lines = [...failedTitles].map(t => byTitle.get(t)).filter(l => l !== undefined);
+      if (lines.length) earliestLine = Math.min(...lines);
+    }
     return { ...reject(passed, `the recorded spec does not replay:\n\n${detail.slice(0, 2500)}`
       + `\n\nThis is the run failing against the live page, so the problem is in the recording itself`
       + ` — a locator that was never really there, a wait that was never really needed, or a step`
-      + ` performed in the wrong order.`, ['replay']), redSpecs };
+      + ` performed in the wrong order.`, ['replay']), redSpecs, earliestLine };
   }
   passed.push('replays green');
 

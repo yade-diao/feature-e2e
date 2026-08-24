@@ -18,8 +18,8 @@
 
 import { spawn } from 'child_process';
 import { readFileSync, writeFileSync, unlinkSync, existsSync, mkdirSync, statSync } from 'fs';
-import { dirname, resolve } from 'path';
-import { featureToSpec, projectOf, SEED_SPEC } from './paths.mjs';
+import { dirname, resolve, relative, join } from 'path';
+import { featureToSpec, projectOf, SEED_SPEC, SPEC_DIR } from './paths.mjs';
 import { target } from './target.mjs';
 import { reportPaths, finalizeDiagnosis } from './diagnose.mjs';
 
@@ -43,14 +43,15 @@ const MCP_CONFIG = '.mcp.json';
  * stored in the journal and read back by the model — so Gherkin needs no
  * translation into the planner's markdown dialect.
  */
-export function buildPrompt({ featurePath, specPath, featureText, baseURL, critique = null }) {
+export function buildPrompt({ featurePath, specPath, featureText, baseURL, critique = null, resumeSeed = null }) {
   const where = target(baseURL);
   const reportJson = reportPaths(featurePath).json;
+  const seed = resumeSeed ?? SEED_FILE;
   return `Verify the business logic in the feature below against the live page, and
 have the generator record what held.
 
 Source feature:  ${featurePath}
-Seed file:       ${SEED_FILE}
+Seed file:       ${seed}
 Start path:      ${where.path}   (relative to baseURL ${where.origin})
 Write the spec to:                       ${specPath}
 Write a diagnosis there instead, if a step cannot be verified:
@@ -61,7 +62,7 @@ ${featureText}
 --- END FEATURE ---
 
 Pass the feature text above verbatim as the \`plan\` to generator_setup_page, and
-"${SEED_FILE}" as \`seedFile\`.
+"${seed}" as \`seedFile\`.
 
 How to work is in your agent definition and does not change between runs: the
 workflow, which tools land in the recording, what you may not do to the page,
@@ -87,9 +88,14 @@ trying to guess every rule.${critique ? `
 ## A previous attempt was rejected
 
 ${critique}
-
+${resumeSeed ? `
+The seed file above is not blank — it already contains the steps that were fine
+last time, verbatim. Calling generator_setup_page runs it for real, so you land
+exactly where it left off with no need to re-verify or rewrite any of it. Pick
+up at the first step the rejection above names, and continue through the end
+of the feature from there.` : `
 Record the scenario again from the start. The rejection above is not advice, it is
-the acceptance criteria — the same checks run again on whatever you produce.` : ''}`;
+the acceptance criteria — the same checks run again on whatever you produce.`}` : ''}`;
 }
 
 /**
@@ -114,9 +120,26 @@ the acceptance criteria — the same checks run again on whatever you produce.` 
  * noticed. Fifteen is long enough for a real recording and short enough that a
  * hang is cheap.
  */
-export const RECORD_TIMEOUT_MS = 900_000;
+export const RECORD_TIMEOUT_MS = 2_400_000;
 
-export function invokeAgent(prompt, { timeoutMs = RECORD_TIMEOUT_MS, agent = AGENT, allowedTools = 'mcp__playwright-test' } = {}) {
+/**
+ * Where this feature's browser scratch output (snapshots, console logs) goes.
+ *
+ * Left unset, every concurrent or sequential recording writes into the same
+ * flat `.playwright-mcp/`, and telling one feature's snapshots from another's
+ * means grepping file contents for which environment they mention. Mirroring
+ * the spec's own path — the same convention `featureToSpec` already uses —
+ * gives each feature its own subtree for free.
+ *
+ * `logs/` sits next to `reports/`: both are generated, project/feature-shaped,
+ * and hold nothing a spec file does — the seed and the specs stay the only
+ * things under `tests/run`.
+ */
+export function mcpOutputDir(specPath) {
+  return join('logs', relative(SPEC_DIR, specPath).replace(/\.spec\.ts$/, ''));
+}
+
+export function invokeAgent(prompt, { timeoutMs = RECORD_TIMEOUT_MS, agent = AGENT, allowedTools = 'mcp__playwright-test', outputDir = null } = {}) {
   return new Promise((resolvePromise, reject) => {
     const child = spawn('claude', [
       '-p',
@@ -124,7 +147,14 @@ export function invokeAgent(prompt, { timeoutMs = RECORD_TIMEOUT_MS, agent = AGE
       '--agent', agent,
       '--permission-mode', 'acceptEdits',
       '--allowed-tools', allowedTools,
-    ], { stdio: ['pipe', 'pipe', 'pipe'] });
+      // Opt-in only: debugging a hang needs to see what the agent was doing
+      // when it stopped, not just that it stopped. Off by default — these
+      // logs are verbose and unrelated to normal recording.
+      ...(process.env.RECORDER_DEBUG_FILE ? ['--debug-file', process.env.RECORDER_DEBUG_FILE] : []),
+    ], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+      env: outputDir ? { ...process.env, PLAYWRIGHT_MCP_OUTPUT_DIR: resolve(outputDir) } : process.env,
+    });
 
     let out = '', err = '';
     const timer = setTimeout(() => { child.kill('SIGKILL'); reject(new Error('agent timed out')); }, timeoutMs);
@@ -170,8 +200,14 @@ export function discardRejectedSpec(specPath, previous) {
   return 'nothing';
 }
 
-/** Record one feature. Returns what happened; the caller decides the exit code. */
-export async function recordFeature({ featurePath, baseURL = null, critique = null }) {
+/**
+ * Record one feature. Returns what happened; the caller decides the exit code.
+ *
+ * `resumeSeed`, when given, is a path to a spec containing already-verified
+ * steps (see `truncateBeforeLine` in spec-ast.mjs) — the retry replays it for
+ * real instead of starting the agent from the blank seed again.
+ */
+export async function recordFeature({ featurePath, baseURL = null, critique = null, resumeSeed = null }) {
   if (!existsSync(featurePath)) throw new Error(`no such feature: ${featurePath}`);
   if (!existsSync(MCP_CONFIG)) {
     throw new Error(`${MCP_CONFIG} is missing — run: npx playwright init-agents --loop=claude`);
@@ -186,6 +222,7 @@ export async function recordFeature({ featurePath, baseURL = null, critique = nu
     featureText: readFileSync(featurePath, 'utf8'),
     baseURL,
     critique,
+    resumeSeed,
   });
 
   // Remember the file as it stands. `existsSync` alone cannot tell "the agent
@@ -195,7 +232,10 @@ export async function recordFeature({ featurePath, baseURL = null, critique = nu
   const diagnosisBefore = existsSync(diagnosisJson) ? statSync(diagnosisJson).mtimeMs : null;
 
   const startedAt = Date.now();
-  const { stdout, stderr } = await invokeAgent(prompt, { allowedTools: 'mcp__playwright-test,Write' });
+  const { stdout, stderr } = await invokeAgent(prompt, {
+    allowedTools: 'mcp__playwright-test,Write',
+    outputDir: mcpOutputDir(specPath),
+  });
 
   const after = existsSync(specPath) ? statSync(specPath).mtimeMs : null;
   const diagnosisAfter = existsSync(diagnosisJson) ? statSync(diagnosisJson).mtimeMs : null;

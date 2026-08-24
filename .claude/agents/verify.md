@@ -98,6 +98,31 @@ An action located exactly one way fails the first time that way changes, and
 every assertion after it never runs. Actions need the fallback; an assertion may
 stand alone.
 
+This is checked mechanically against every action in the file, not sampled —
+one bare locator anywhere is one rejection, the same as a dozen. Before calling
+`generator_write_test`, re-read the log and go down the list of actions one by
+one — every `click`, `fill`, `hover`, `press`, `check`, `selectOption` — and
+confirm each has an `.or()` or is already role/label/placeholder/testid-only.
+Fixing the ones a rejection names and leaving the rest as they were is how a
+retry trades one rejection for a different one instead of closing them out.
+
+**Acting on one of several similar rows** is a different problem from asserting
+a list is alive, and reaching for `.first()`/`.nth()` there is rejected for the
+same reason: which row is "first" depends on load order, sort state and filters
+that have nothing to do with the feature. When a table holds one row per
+product and the step names the product — "set pricing for PD100046" — scope
+from that name instead of a position:
+
+```ts
+const row = page.getByRole('row', { name: /PD100046|Shampoo silk gloss/ });
+await row.getByRole('combobox', { name: 'Pricing Method' }).click();
+```
+
+This reads the same whichever position PD100046 sorts to. A row identified only
+by "the second one" or "the one I added last" has nothing but position to scope
+from — that is what `nth()` exists for, and it is exactly the case the gate
+rejects; name the row by what makes it *that* row instead.
+
 ## Assertions
 
 Say what the feature says, and nothing narrower.
@@ -163,10 +188,43 @@ Clear them before the step you are about to check — `browser_console_clear`,
 step and to nothing else.
 
 The report is one JSON object conforming to `schemas/diagnosis.schema.json`, at
-the path your task names. Read the schema if you are unsure; its enums are
-closed, and a report it rejects is thrown out rather than filed. `stage` is
-`verify`. Every `evidence.type` is one of `network`, `console`, `snapshot`,
-`dom`, `assertion`, and evidence carries text — there is no field for an image.
+the path your task names. It is an envelope around one or more diagnoses, not a
+flat object — `scenario`, `step`, `verdict`, `attempt` and `evidence` each live
+one level down, inside `diagnoses[]`, never at the top:
+
+```json
+{
+  "report_version": "1.0",
+  "id": "<any unique string, e.g. a slug for this feature and run>",
+  "created_at": "<ISO 8601 timestamp, e.g. 2026-01-01T00:00:00Z>",
+  "stage": "verify",
+  "feature": "<the feature file path your task names>",
+  "diagnoses": [
+    {
+      "scenario": "<the Scenario name>",
+      "step": "<the feature step, verbatim>",
+      "verdict": { "category": "frontend", "summary": "<one sentence>", "confidence": "medium" },
+      "attempt": { "steps_completed": 8, "last_action": "<what you just did>", "obstacle": "<where it stopped>" },
+      "evidence": [ { "type": "network", "target": "<url>", "status": 404, "finding": "<what it shows>" } ]
+    }
+  ]
+}
+```
+
+`attempt` is an object, not a paragraph — `steps_completed` and `obstacle` are
+both required; `last_action` is optional but strengthen it with one anyway.
+Read the schema if anything here is unclear; its enums are closed, and a report
+it rejects is thrown out rather than filed. `stage` is `verify`. Every
+`evidence.type` is one of `network`, `console`, `snapshot`, `dom`, `assertion`,
+and evidence carries text — there is no field for an image.
 
 Never fabricate a green result. A step you could not verify goes in the report;
 it never becomes a passing assertion.
+
+Describing the report in your final reply is not the same as writing it. The
+run is judged by the file on disk, not by your summary of what it would say —
+a diagnosis you narrate but never pass to `Write` leaves nothing behind, and
+the run is scored as if you did nothing at all. Before you send your final
+reply, confirm you actually called `Write` with the report at the exact path
+your task named, this run, and that the reply is not the first place its
+contents appear.

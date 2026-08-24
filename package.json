@@ -10,8 +10,9 @@
     "record": "node src/cli.mjs record",
     "heal": "node src/cli.mjs heal",
     "replay": "node src/cli.mjs replay",
-    "test": "node --test \"src/**/*.test.mjs\"",
-    "setup:agents": "playwright init-agents --loop=claude"
+    "test": "node --test src",
+    "setup:agents": "playwright init-agents --loop=claude",
+    "postinstall": "patch-package"
   },
   "devDependencies": {
     "@cucumber/gherkin": "^42.0.1",
@@ -19,6 +20,7 @@
     "@playwright/test": "^1.62.1",
     "eslint": "^10.8.1",
     "eslint-plugin-playwright": "^2.11.0",
+    "patch-package": "^8.0.1",
     "typescript-eslint": "^8.67.0"
   },
   "keywords": [

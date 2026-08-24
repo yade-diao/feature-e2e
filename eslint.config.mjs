@@ -1,4 +1,5 @@
 import playwright from 'eslint-plugin-playwright';
+import tsParser from '@typescript-eslint/parser';
 
 /**
  * Lint rules for recorded specs.
@@ -20,6 +21,7 @@ export default [
     ignores: ['**/seed.spec.ts'],
     plugins: { playwright },
     languageOptions: {
+      parser: tsParser,
       parserOptions: { ecmaVersion: 'latest', sourceType: 'module' },
     },
     rules: {
