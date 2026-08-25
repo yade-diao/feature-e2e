@@ -167,6 +167,18 @@ async function cmdRecord() {
             : `    FAILED  the agent produced no ${result.specPath}`);
           console.log(`    agent said: ${result.agentSaid || '(nothing)'}`);
         }
+        // An attempt that ends without a spec still happened, and still cost a
+        // browser session. Leaving it out made the journal blind to a whole
+        // class of outcome — a feature that ends in a diagnosis every time
+        // looked, to the thing that measures this tool, like a feature nobody
+        // had tried to record. `outcome` is what the gates never get to judge.
+        logAttempt({
+          run: runId, feature, attempt, ms: result.ms ?? 0, ok: false,
+          passed: 0, gates: [],
+          outcome: result.diagnosisWritten
+            ? (result.diagnosisOk ? 'diagnosis' : 'invalid diagnosis')
+            : 'no artifact',
+        });
         // A resume seed that will not load, or whose prefix has since gone red,
         // leaves the generator with no paused page at all — Playwright pauses a
         // test that passed, never one that failed. The attempt then ends with
@@ -174,14 +186,6 @@ async function cmdRecord() {
         // rather than spending the attempts that are left on the same prefix.
         if (resumeSeed && !result.diagnosisWritten) {
           console.log('    nothing came back — dropping the resume seed, the next attempt starts blank');
-          // This attempt happened and cost what an attempt costs, so it belongs
-          // in the journal like any other. Leaving it out was harmless while
-          // this branch always ended the loop; now that it consumes one of the
-          // attempts, an unlogged one makes the pass rate read better than it is.
-          logAttempt({
-            run: runId, feature, attempt, ms: result.ms ?? 0, ok: false,
-            passed: 0, gates: ['no artifact'],
-          });
           resumeSeed = null;
           if (existsSync(resumeSeedPath)) unlinkSync(resumeSeedPath);
           continue;
@@ -249,12 +253,19 @@ async function cmdRecord() {
   process.off('SIGINT', onSignal);
   process.off('SIGTERM', onSignal);
 
+  // Every recording ever made, not this run. The number is a trend — one run is
+  // an anecdote, which is the reason the journal exists — but printed bare at
+  // the end of a run it reads as this run's result, and a run that recorded
+  // nothing would still report a rate.
   const s = summary();
   if (s.runs) {
-    console.log(`\nfirst-attempt pass rate: ${s.firstTry}/${s.runs} (${(s.rate * 100).toFixed(0)}%)`
-      + `  over ${s.attempts} attempt(s)`);
+    console.log(`\nall recordings so far — first-attempt pass rate: ${s.firstTry}/${s.runs}`
+      + ` (${(s.rate * 100).toFixed(0)}%) over ${s.attempts} attempt(s)`);
     if (s.rejections.length) {
-      console.log(`rejections by gate: ${s.rejections.map(([g, n]) => `${g} ${n}`).join(', ')}`);
+      console.log(`  rejections by gate: ${s.rejections.map(([g, n]) => `${g} ${n}`).join(', ')}`);
+    }
+    if (s.outcomes.length) {
+      console.log(`  attempts that produced no spec: ${s.outcomes.map(([o, n]) => `${o} ${n}`).join(', ')}`);
     }
   }
 

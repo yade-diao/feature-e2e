@@ -181,6 +181,19 @@ Every diagnosis lists what you actually observed — a network request and its
 status, a console error, a snapshot you took. The `attempt` field shows how far
 you got and where you stopped; an empty effort is worse than a wrong verdict.
 
+Before an empty result is evidence of anything, confirm the application accepted
+what you did. A search that needs more characters than you typed, a field that
+failed validation, a disabled button, a filter still narrowing the list — each
+leaves a page that looks exactly like one with genuinely nothing to show, and
+each renders a message saying so. Read that message before you read the result.
+An application declining to answer is not the application answering "none", and
+a diagnosis built on the second when the first happened is wrong in the
+direction that is hardest to catch: it names a fault in the environment when the
+fault was in the attempt.
+
+The same care applies to ruling something out. Retrying with a broader term only
+rules out an over-specific one if the broader term actually ran.
+
 Scope it to the step. `browser_console_messages` and `browser_network_requests`
 return everything since the page loaded, which buries the one line that matters.
 Clear them before the step you are about to check — `browser_console_clear`,

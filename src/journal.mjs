@@ -39,6 +39,15 @@ export function summary(attempts = readAttempts()) {
   }
   const firstTry = [...runs.values()].filter(r => r[0]?.ok).length;
   const byGate = new Map();
+  // An attempt that produced no spec was never judged by a gate, so it lands in
+  // none of the counts below. It still lowers the pass rate, and a rate with
+  // nothing accounting for it reads as gates rejecting silently — so what
+  // happened instead is counted here.
+  const byOutcome = new Map();
+  for (const a of attempts) {
+    if (!a.outcome) continue;
+    byOutcome.set(a.outcome, (byOutcome.get(a.outcome) ?? 0) + 1);
+  }
   for (const a of attempts) {
     if (a.ok) continue;
     // `gates` is the current shape and names every gate that said no. `gate` is
@@ -54,5 +63,6 @@ export function summary(attempts = readAttempts()) {
     rate: runs.size ? firstTry / runs.size : 0,
     attempts: attempts.length,
     rejections: [...byGate.entries()].sort((a, b) => b[1] - a[1]),
+    outcomes: [...byOutcome.entries()].sort((a, b) => b[1] - a[1]),
   };
 }
