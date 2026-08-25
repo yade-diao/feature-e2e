@@ -203,12 +203,23 @@ otherwise select for the emptiest possible recording, since a spec that asserts
 nothing always replays green. It cannot, however, get past step coverage.
 
 A retry does not start from scratch. The gates report the line each objection
-sits on, and the spec is cut at the last `test.step` that ends before the
-earliest of them; that truncated spec becomes the next attempt's seed. Playwright
-runs a seed for real, so the agent lands where the previous attempt left off and
-picks up at the step the rejection names, instead of re-driving steps nobody
-objected to. When no gate reported a line, or nothing survives the cut, the retry
-falls back to the blank seed.
+sits on, and the spec is cut at the last `test.step` that ends before the earliest
+of them; that truncated spec becomes the next attempt's seed. Playwright runs a
+seed for real, so the agent lands where the previous attempt left off and picks up
+at the step the rejection names, instead of re-driving steps nobody objected to.
+The seed sets its own timeout, because the server that runs it does not.
+
+The cut refuses more often than it makes one, and each refusal has a reason:
+
+- **the feature has more than one scenario** — a seed holds a single test.
+  Playwright pauses at the end of every test function and the generator attaches
+  at the first pause, so a seed carrying two would hand it the wrong page.
+- **a feature step is missing from the spec** — a hole in the prefix is not a bad
+  line in it, and cutting anyway would freeze the gap in for every later attempt.
+- **nothing complete sits before the cut**, or the result does not parse.
+
+Each of those falls back to the blank seed, which is what every retry did before
+any of this existed.
 
 `.recordings.jsonl` keeps a line per attempt, and `record` prints the
 first-attempt pass rate and a count of rejections per gate.
