@@ -66,3 +66,75 @@ test('rejection: a spec that clears every static gate names nothing', async () =
   assert.deepEqual(v.failed, [], 'nothing rejected it, so nothing may be named');
   f.cleanup();
 });
+
+/**
+ * Counterexamples for the cut a rejection hands the next attempt.
+ *
+ * `earliestLine` is what lets a retry replay the prefix that was fine instead of
+ * re-driving the whole feature. Both of these are ways it named a line that was
+ * not safe to keep — and a cut that keeps the fault is worse than no cut, because
+ * every remaining attempt inherits it.
+ */
+
+/** The 1-based line a fragment first appears on. */
+const lineOf = (source, fragment) => source.slice(0, source.indexOf(fragment)).split('\n').length;
+
+test('cut: a spec that skipped a step offers no prefix at all', async () => {
+  // Coverage fails (one step of two is wrapped) and banned patterns fails on a
+  // line, so a cut was perfectly computable — and computing it would have frozen
+  // the missing step into the seed, where the retry is told not to touch it.
+  const f = fixture(
+    FEATURE(['Given a page', 'Then something is shown']),
+    SPEC(`    await test.step('Given a page', async () => { await expect(page.getByRole('row').first()).toBeVisible(); });`));
+
+  const v = await staticGates(f.feature, f.spec);
+
+  assert.equal(v.ok, false);
+  assert.deepEqual(v.failed, ['step coverage', 'banned patterns']);
+  assert.equal(v.earliestLine, null,
+    'a missing step is a hole in the prefix, not a bad line in it — there is no '
+    + 'safe cut to offer, however many other gates reported one');
+  f.cleanup();
+});
+
+test('cut: a repeated step title resolves to its first occurrence', async () => {
+  // A Background step is prepended to every scenario, so a feature with one
+  // guarantees repeated step text. Liveness reports the step by title, and the
+  // title has to resolve back to the copy that offends first — resolving to the
+  // last left the offending step sitting inside the prefix, which is exactly
+  // what the cut exists to exclude.
+  const feature = 'Feature: F\n'
+    + '  Background:\n'
+    + '    Given no error banner is shown\n'
+    + '  Scenario: One\n'
+    + '    Then the first list is shown\n'
+    + '  Scenario: Two\n'
+    + '    Then the second list is shown\n';
+
+  const naked = (title, body) =>
+    `    await test.step('${title}', async () => {\n      ${body}\n    });\n`;
+
+  const spec = `import { test, expect } from '@playwright/test';\n`
+    + `test.describe('F', () => {\n`
+    + `  test('One', async ({ page }) => {\n`
+    + naked('Given no error banner is shown', `await expect(page.getByRole('alert')).toHaveCount(0);`)
+    + naked('Then the first list is shown', `await expect(page.getByRole('row')).toHaveCount(3);`)
+    + `  });\n`
+    + `  test('Two', async ({ page }) => {\n`
+    + naked('Given no error banner is shown', `await expect(page.getByRole('alert')).toHaveCount(0);`)
+    + naked('Then the second list is shown', `await expect(page.getByRole('list')).toHaveCount(2);`)
+    + `  });\n});\n`;
+
+  const f = fixture(feature, spec);
+  const v = await staticGates(f.feature, f.spec);
+
+  assert.equal(v.ok, false);
+  assert.deepEqual(v.failed, ['liveness'], 'only the absence-only Background step is at fault');
+
+  const first = lineOf(spec, `await test.step('Given no error banner is shown'`);
+  const last = spec.split('\n').findLastIndex(l => l.includes(`test.step('Given no error banner is shown'`)) + 1;
+  assert.notEqual(first, last, 'the fixture has to actually repeat the title');
+  assert.equal(v.earliestLine, first,
+    `the cut must name the first copy (line ${first}), not the last (line ${last})`);
+  f.cleanup();
+});

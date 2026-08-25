@@ -22,6 +22,25 @@ import { playwright } from './playwright.mjs';
 import { testSteps } from './spec-ast.mjs';
 
 /**
+ * Step title -> the line the *first* step with that title opens on.
+ *
+ * Duplicate titles are ordinary rather than exceptional: two scenarios opening
+ * with the same Given is plain Gherkin, and a Background step is prepended to
+ * every scenario, so a feature with a Background guarantees them. `new Map(...)`
+ * over the pairs keeps the last of each, which is the wrong end — a fault
+ * reported by title then resolved to a later copy, and the cut computed from it
+ * left the offending step itself sitting inside the prefix. That is precisely
+ * what the cutoff exists to exclude, arriving through the other door.
+ */
+function firstLineByTitle(specPath) {
+  const byTitle = new Map();
+  for (const step of testSteps(specPath)) {
+    if (!byTitle.has(step.title)) byTitle.set(step.title, step.line);
+  }
+  return byTitle;
+}
+
+/**
  * The first line any gate objected to, so a retry can replay the untouched
  * prefix instead of re-driving the whole feature through the agent again.
  *
@@ -29,13 +48,20 @@ import { testSteps } from './spec-ast.mjs';
  * already returns — so it is resolved back to a line through the spec's own
  * `test.step` titles, the same title text `checkStepCoverage` matches on.
  */
-function earliestLine(specPath, { banned, liveness, redundancy }) {
+function earliestLine(specPath, { coverage, banned, liveness, redundancy }) {
+  // A spec that skipped a feature step has no prefix worth keeping. The gap is
+  // not a bad line, so a line-based answer cannot see it: cutting anyway leaves
+  // the missing step inside the seed, and the retry is told to pick up after
+  // the cut — so the same coverage rejection comes back every attempt until
+  // they run out. "No prefix" is the honest answer to a hole.
+  if (!coverage.ok) return null;
+
   const lines = [
     ...banned.hits.map(h => h.line),
     ...redundancy.naked.map(n => n.line),
   ];
   if (liveness.naked.length) {
-    const byTitle = new Map(testSteps(specPath).map(s => [s.title, s.line]));
+    const byTitle = firstLineByTitle(specPath);
     for (const title of liveness.naked) {
       const line = byTitle.get(title);
       if (line !== undefined) lines.push(line);
@@ -132,7 +158,7 @@ export async function staticGates(featurePath, specPath) {
 
   if (failures.length) {
     return { ...reject(passed, failures.join('\n\n'), failed),
-      earliestLine: earliestLine(specPath, { banned, liveness, redundancy }) };
+      earliestLine: earliestLine(specPath, { coverage, banned, liveness, redundancy }) };
   }
 
   return { ok: true, passed, failed: [], critique: null, earliestLine: null };
@@ -209,7 +235,7 @@ export function replayGate(specPaths) {
     const failedTitles = new Set(steps.filter(s => !s.ok && s.error).map(s => s.title));
     let earliestLine = null;
     if (failedTitles.size && specPaths.length === 1) {
-      const byTitle = new Map(testSteps(specPaths[0]).map(s => [s.title, s.line]));
+      const byTitle = firstLineByTitle(specPaths[0]);
       const lines = [...failedTitles].map(t => byTitle.get(t)).filter(l => l !== undefined);
       if (lines.length) earliestLine = Math.min(...lines);
     }

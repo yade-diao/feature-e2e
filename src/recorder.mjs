@@ -46,7 +46,9 @@ const MCP_CONFIG = '.mcp.json';
 export function buildPrompt({ featurePath, specPath, featureText, baseURL, critique = null, resumeSeed = null }) {
   const where = target(baseURL);
   const reportJson = reportPaths(featurePath).json;
-  const seed = resumeSeed ?? SEED_FILE;
+  // One convention for both, the way SEED_FILE is already written: the server
+  // reads these as posix paths whatever `join` produced.
+  const seed = (resumeSeed ?? SEED_FILE).split('\\').join('/');
   return `Verify the business logic in the feature below against the live page, and
 have the generator record what held.
 
@@ -91,9 +93,16 @@ ${critique}
 ${resumeSeed ? `
 The seed file above is not blank — it already contains the steps that were fine
 last time, verbatim. Calling generator_setup_page runs it for real, so you land
-exactly where it left off with no need to re-verify or rewrite any of it. Pick
-up at the first step the rejection above names, and continue through the end
-of the feature from there.` : `
+exactly where it left off. Pick up at the first step the rejection above names,
+and continue through the end of the feature from there.
+
+You do not need to re-*drive* those earlier steps. You do still have to re-*emit*
+them: the file you write must contain every step of the feature, the earlier ones
+worded and located exactly as the seed has them. generator_read_log gives you the
+seed's full source back under "# Seed file" — copy the steps from there. Copy the
+steps only: the seed's test.setTimeout line bounds the seed's own replay and has
+no business in a recording. A file holding only the steps you drove this time is
+missing the rest, and is rejected for it.` : `
 Record the scenario again from the start. The rejection above is not advice, it is
 the acceptance criteria — the same checks run again on whatever you produce.`}` : ''}`;
 }
@@ -115,10 +124,14 @@ the acceptance criteria — the same checks run again on whatever you produce.`}
  *    server takes its root from the client's cwd first.
  */
 /**
- * Successful recordings have taken 7-12 minutes. Thirty minutes was not a
- * timeout, it was an invitation: a stalled run burned 25 of them before anyone
- * noticed. Fifteen is long enough for a real recording and short enough that a
- * hang is cheap.
+ * Successful recordings have taken 7-12 minutes, and a feature with several
+ * scenarios takes longer than one with a single scenario.
+ *
+ * This bound is the last one there is, so it is not the place to be tight: the
+ * per-tool timeouts in patches/playwright+1.62.1.patch and the seed's own
+ * `test.setTimeout` are what end a stuck step in seconds. What is left for this
+ * to catch is an agent that stopped making progress altogether, and forty
+ * minutes says that with no room for argument.
  */
 export const RECORD_TIMEOUT_MS = 2_400_000;
 

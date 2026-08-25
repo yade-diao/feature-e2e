@@ -20,7 +20,7 @@
 
 import { existsSync, readFileSync, writeFileSync, unlinkSync } from 'fs';
 import { dirname, join } from 'path';
-import { FEATURE_DIR, featureToSpec, listFeatures, pairing, specToFeature } from './paths.mjs';
+import { FEATURE_DIR, RESUME_SEED, featureToSpec, listFeatures, pairing, specToFeature } from './paths.mjs';
 import { recordFeature, discardRejectedSpec } from './recorder.mjs';
 import { truncateBeforeLine } from './spec-ast.mjs';
 import { healFeature } from './healer.mjs';
@@ -131,10 +131,11 @@ async function cmdRecord() {
 
     // A retry that starts from the blank seed re-drives every step the agent
     // already got right — minutes and a model call apiece — just to reach the
-    // one the critique names. Written next to the spec so it never lingers as
-    // a stray *.spec.ts if the loop exits early; removed after every attempt.
+    // one the critique names. It goes next to the spec because Playwright runs
+    // a seed only from its own testDir; the leading dot is what keeps listSpecs
+    // from reading it as a recording (see RESUME_SEED in paths.mjs).
     let resumeSeed = null;
-    const resumeSeedPath = join(dirname(specPath), '.resume-seed.spec.ts');
+    const resumeSeedPath = join(dirname(specPath), RESUME_SEED);
     pendingCleanup = () => {
       discardRejectedSpec(specPath, specBefore);
       if (existsSync(resumeSeedPath)) unlinkSync(resumeSeedPath);
@@ -165,6 +166,25 @@ async function cmdRecord() {
             ? `    FAILED  ${result.specPath} was not touched - this is a leftover from an earlier run`
             : `    FAILED  the agent produced no ${result.specPath}`);
           console.log(`    agent said: ${result.agentSaid || '(nothing)'}`);
+        }
+        // A resume seed that will not load, or whose prefix has since gone red,
+        // leaves the generator with no paused page at all — Playwright pauses a
+        // test that passed, never one that failed. The attempt then ends with
+        // nothing, and the seed is the only thing this run introduced. Drop it
+        // rather than spending the attempts that are left on the same prefix.
+        if (resumeSeed && !result.diagnosisWritten) {
+          console.log('    nothing came back — dropping the resume seed, the next attempt starts blank');
+          // This attempt happened and cost what an attempt costs, so it belongs
+          // in the journal like any other. Leaving it out was harmless while
+          // this branch always ended the loop; now that it consumes one of the
+          // attempts, an unlogged one makes the pass rate read better than it is.
+          logAttempt({
+            run: runId, feature, attempt, ms: result.ms ?? 0, ok: false,
+            passed: 0, gates: ['no artifact'],
+          });
+          resumeSeed = null;
+          if (existsSync(resumeSeedPath)) unlinkSync(resumeSeedPath);
+          continue;
         }
         break;   // no spec: a diagnosis is a result, not a retry, and no artifact has nothing to critique
       }

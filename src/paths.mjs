@@ -15,7 +15,7 @@
  */
 
 import { readdirSync, statSync, existsSync } from 'fs';
-import { join, relative, sep } from 'path';
+import { basename, join, relative, sep } from 'path';
 
 export const FEATURE_DIR = join('tests', 'features');
 export const SPEC_DIR = join('tests', 'run');
@@ -67,11 +67,26 @@ export function listFeatures(project = null) {
  */
 export const SEED_SPEC = join(SPEC_DIR, 'seed.spec.ts');
 
-/** All recorded specs, optionally narrowed to one project. Excludes the seed. */
+/**
+ * The seed a rejected recording leaves behind for the next attempt (written and
+ * removed by cli.mjs). It has to live under SPEC_DIR and end in `.spec.ts`,
+ * because Playwright runs a seed only if its own testMatch collects it from
+ * testDir — so this is the one place that can tell it from a recording.
+ */
+export const RESUME_SEED = '.resume-seed.spec.ts';
+
+/**
+ * All recorded specs, optionally narrowed to one project.
+ *
+ * A leading dot marks infrastructure rather than a recording, which is why the
+ * rule is a rule and not a second literal path: a file left behind by an
+ * interrupted run was otherwise reported as a spec with no feature, and `status`
+ * failed on a hidden file nobody could see in the directory.
+ */
 export function listSpecs(project = null) {
   const root = project ? join(SPEC_DIR, project) : SPEC_DIR;
   return walk(root, n => n.endsWith('.spec.ts'))
-    .filter(p => p !== SEED_SPEC)
+    .filter(p => p !== SEED_SPEC && !basename(p).startsWith('.'))
     .sort();
 }
 
