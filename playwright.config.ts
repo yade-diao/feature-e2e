@@ -1,9 +1,22 @@
 import { defineConfig, devices } from '@playwright/test';
 
 /**
+ * The origin under test, from BASE_URL. Fails loudly if unset rather than falling
+ * back to a placeholder host — a missing BASE_URL must not silently point a replay
+ * at some unrelated real site.
+ */
+function baseOrigin(): string {
+  const raw = process.env.BASE_URL;
+  if (!raw) {
+    throw new Error('BASE_URL is not set — export BASE_URL=<entry page URL> (e.g. https://your-env.example.com/) before replaying.');
+  }
+  return new URL(raw).origin;
+}
+
+/**
  * Replay configuration.
  *
- * `testDir` is `tests/run`, which holds both the recorded specs and the
+ * `testDir` is `run`, which holds both the recorded specs and the
  * generator's seed file. The seed has to live here — Playwright runs it during
  * recording — but it is an empty placeholder that does not belong in a
  * regression run, so `replay` names the recorded specs explicitly rather than
@@ -11,10 +24,13 @@ import { defineConfig, devices } from '@playwright/test';
  * recording too.
  *
  * Nothing model-related is configured here on purpose. Replay must be pure
- * Playwright so that a red run in CI is an honest regression signal.
+ * Playwright so that a red run in CI is an honest regression signal. The one
+ * local-only exception is the client-certificate handling in `projects` below,
+ * gated on `!CI`: it is needed to replay against a cert-protected environment on
+ * a developer machine, and skipped on CI where no such certificate exists.
  */
 export default defineConfig({
-  testDir: './tests/run',
+  testDir: './run',
   timeout: 120_000,
   expect: { timeout: 15_000 },
 
@@ -39,7 +55,7 @@ export default defineConfig({
     // Origin only. BASE_URL may name the entry page in full; the path belongs in
     // the spec's goto() so the same recording can run against another
     // environment by changing nothing but this.
-    baseURL: new URL(process.env.BASE_URL ?? 'http://www.people.com.cn/').origin,
+    baseURL: baseOrigin(),
     locale: 'zh-CN',
     viewport: { width: 1440, height: 900 },
 
@@ -49,7 +65,26 @@ export default defineConfig({
   },
 
   projects: [
-    { name: 'chromium', use: { ...devices['Desktop Chrome'] } },
+    {
+      name: 'chromium',
+      use: {
+        ...devices['Desktop Chrome'],
+        // Local replay against an environment that requires a client certificate
+        // hits the same "select a certificate" dialog recording does. Off CI,
+        // use real Chrome (reads the macOS Keychain) and auto-answer the prompt —
+        // the same fix as playwright.record.config.ts. On CI this is skipped: the
+        // runner has no such certificate, and replay must stay pure Playwright so
+        // a red run is an honest regression signal.
+        ...(process.env.CI
+          ? {}
+          : {
+              channel: 'chrome',
+              launchOptions: {
+                args: ['--auto-select-certificate-for-urls=[{"pattern":"*","filter":{}}]'],
+              },
+            }),
+      },
+    },
   ],
 
   /**

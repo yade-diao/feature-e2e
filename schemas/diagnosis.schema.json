@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://example.com/schemas/diagnosis.schema.json",
   "title": "Diagnosis report",
-  "description": "The structured artifact produced when a piece of business logic cannot be verified. Verdict categories and evidence types are closed enums on purpose — the agent must choose, it may not free-associate. The same shape is produced by both the verify agent (a step it could not verify) and the healer agent (a locator it could not repair). src/diagnose.mjs is the executable form of these constraints.",
+  "description": "The structured artifact produced when a piece of business logic cannot be verified. Verdict categories and evidence types are closed enums on purpose — the agent must choose, it may not free-associate. Produced by the verify agent, whether on a first recording or a Mode B repair of an existing spec/trace. src/diagnose.mjs is the executable form of these constraints.",
   "type": "object",
   "required": [
     "report_version",
@@ -26,7 +26,7 @@
     },
     "stage": {
       "enum": ["verify", "heal"],
-      "description": "Which stage failed: verify (the step could not be verified) or heal (the locator could not be repaired)."
+      "description": "Which stage failed. Always 'verify' now (a first recording or a Mode B repair); 'heal' is retained only so reports from the old healer agent still validate."
     },
     "feature": {
       "type": "string",

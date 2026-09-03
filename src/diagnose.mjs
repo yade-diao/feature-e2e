@@ -2,10 +2,11 @@
  * Diagnosis reports — the structured artifact produced when a piece of business
  * logic cannot be verified.
  *
- * Two agents write these, and both must write the *same shape*: the verify agent
- * when a step cannot be verified, and the healer agent when a locator cannot be
- * repaired (because the page itself changed). Keeping the shape identical is
- * what lets one failure exit serve both.
+ * The verify agent writes these whenever a piece of business logic cannot be
+ * verified — on a first recording (Mode A) or while repairing an existing
+ * spec/trace (Mode B), the same shape either way, so one failure exit serves
+ * both. `stage` is always `verify`; `heal` remains a legal stage only so that
+ * diagnosis reports written by the old healer agent still validate.
  *
  * The shape is closed on purpose. `category` and `evidence.type` are enums, not
  * free text — an agent that could write any verdict would write a plausible one
@@ -100,6 +101,46 @@ function validateDiagnosisEntry(d, i, push) {
       if (!EVIDENCE_TYPES.includes(e.type)) push(`${at}.evidence[${j}].type`, `must be one of: ${EVIDENCE_TYPES.join(', ')}`);
     });
   }
+}
+
+/**
+ * Advisory — does this report look like a cascade rather than several faults?
+ *
+ * When steps run in order and one leaves the page broken, every later step fails
+ * too, but those are consequences, not independent problems. A report that emits
+ * an independent verdict for each buries the one that matters. This does not
+ * reject anything — causation cannot be proven from JSON, and some features have
+ * genuinely independent failures — it only surfaces a note, the same "list, do
+ * not reject" posture as the audit checks. See knowledge/local/engine/cascading-failure.md.
+ *
+ * The signal: more than one diagnosis, and every one after the first reads as a
+ * bare consequence — its obstacle/summary is a timeout / not-found / detached,
+ * with no substantive evidence (a network, console or assertion finding) of its
+ * own. The first, by contrast, is where the substantive cause sits.
+ *
+ * @returns {{ likelyCascade: boolean, note: string|null }}
+ */
+const CONSEQUENCE = /\b(time(d)?\s*out|timeout|not\s+found|no\s+such\s+element|detached|not\s+visible|never\s+appeared)\b/i;
+const SUBSTANTIVE_EVIDENCE = ['network', 'console', 'assertion'];
+
+export function detectCascade(report) {
+  const diags = Array.isArray(report?.diagnoses) ? report.diagnoses : [];
+  if (diags.length < 2) return { likelyCascade: false, note: null };
+
+  const downstream = diags.slice(1);
+  const allConsequences = downstream.every(d => {
+    const text = `${d?.attempt?.obstacle ?? ''} ${d?.verdict?.summary ?? ''}`;
+    const hasSubstantive = Array.isArray(d?.evidence)
+      && d.evidence.some(e => SUBSTANTIVE_EVIDENCE.includes(e?.type));
+    return CONSEQUENCE.test(text) && !hasSubstantive;
+  });
+
+  if (!allConsequences) return { likelyCascade: false, note: null };
+  const first = diags[0]?.step ?? diags[0]?.scenario ?? 'the first';
+  return {
+    likelyCascade: true,
+    note: `${downstream.length} of ${diags.length} diagnoses read as downstream timeouts — this looks like a cascade from the first failure ("${first}"). Consider attributing the root cause to it alone.`,
+  };
 }
 
 /**
@@ -207,5 +248,7 @@ export function finalizeDiagnosis(featurePath) {
     mkdirSync(resolve(dirname(md)), { recursive: true });
     writeFileSync(md, renderDiagnosis(report));
   }
-  return { ...verdict, json, md };
+  // Advisory, additive: never flips ok, never blocks. Callers may surface it.
+  const { note: cascadeNote } = verdict.ok ? detectCascade(report) : { note: null };
+  return { ...verdict, cascadeNote, json, md };
 }

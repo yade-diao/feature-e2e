@@ -18,7 +18,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { checkStepCoverage, checkBannedPatterns, checkStepSubstance, checkSemanticStability, checkLocatorRobustness, checkLocatorRedundancy } from '../checks.mjs';
+import { checkStepCoverage, checkBannedPatterns, checkSemanticStability, checkLocatorRobustness, checkLocatorRedundancy, checkWriteCheckpoint } from '../checks.mjs';
 
 /** Write a feature and a spec to a scratch directory and hand back their paths. */
 function fixture(featureBody, specBody) {
@@ -110,21 +110,7 @@ test('banned patterns: a linter that cannot run is not a pass', async () => {
   assert.equal(r.ok, false, 'no result must never read as a clean result');
 });
 
-// ── step substance ───────────────────────────────────────────────────────────
-
-test('step substance: rejects a step that did nothing at runtime', () => {
-  const r = checkStepSubstance([
-    { title: 'Given a page', children: ['pw:api'] },
-    { title: 'Then something', children: [] },
-  ]);
-  assert.equal(r.ok, false);
-  assert.equal(r.empty.length, 1);
-});
-
-test('step substance: an attachment counts as doing something', () => {
-  const r = checkStepSubstance([{ title: 'Then it looks right', children: ['pw:api', 'test.attach'] }]);
-  assert.equal(r.ok, true);
-});
+// ── step coverage: title decoding ────────────────────────────────────────────
 
 test('step coverage: escape sequences in the title are decoded before matching', () => {
   const f = fixture(
@@ -362,5 +348,55 @@ test('locator redundancy: a split chain that does carry .or() is still let throu
       .click();`));
   assert.equal(checkLocatorRedundancy(f.spec).ok, true,
     'a fallback chain is what the gate asks for — line breaks must not turn it into a rejection');
+  f.cleanup();
+});
+
+// ── write checkpoint (audit) ──────────────────────────────────────────────────
+
+test('write checkpoint: a fill with no assertion is a naked write', () => {
+  const f = fixture(
+    FEATURE(['When the name is entered']),
+    SPEC(`    await test.step('When the name is entered', async () => {
+      await page.getByLabel('Name').fill('Ada');
+    });`));
+  const r = checkWriteCheckpoint(f.spec);
+  assert.equal(r.ok, false);
+  assert.equal(r.naked.length, 1);
+  assert.match(r.naked[0].title, /name is entered/);
+  f.cleanup();
+});
+
+test('write checkpoint: a fill followed by a presence assertion passes', () => {
+  const f = fixture(
+    FEATURE(['When the name is entered']),
+    SPEC(`    await test.step('When the name is entered', async () => {
+      await page.getByLabel('Name').fill('Ada');
+      await expect(page.getByLabel('Name')).toHaveValue('Ada');
+    });`));
+  assert.equal(checkWriteCheckpoint(f.spec).ok, true);
+  f.cleanup();
+});
+
+test('write checkpoint: a pure navigation click is not a write', () => {
+  const f = fixture(
+    FEATURE(['When the user opens the page']),
+    SPEC(`    await test.step('When the user opens the page', async () => {
+      await page.getByRole('link', { name: 'Home' }).click();
+    });`));
+  assert.equal(checkWriteCheckpoint(f.spec).ok, true,
+    'a bare click changes nothing — it must not be flagged as a naked write');
+  f.cleanup();
+});
+
+test('write checkpoint: a search that asserts its result in-step is fine', () => {
+  const f = fixture(
+    FEATURE(['When the user searches for a term']),
+    SPEC(`    await test.step('When the user searches for a term', async () => {
+      await page.getByRole('searchbox').fill('term');
+      await page.getByRole('searchbox').press('Enter');
+      await expect(page.getByRole('row')).toBeVisible();
+    });`));
+  assert.equal(checkWriteCheckpoint(f.spec).ok, true,
+    'the known search false-positive: fill+Enter with an in-step result assertion must pass');
   f.cleanup();
 });

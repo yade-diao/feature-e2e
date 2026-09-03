@@ -16,61 +16,36 @@
  * them at once lets a single retry fix all of them.
  */
 
-import { readFileSync, existsSync, unlinkSync } from 'fs';
-import { checkStepCoverage, checkStepSubstance, checkBannedPatterns, checkLiveness, checkLocatorRedundancy } from './checks.mjs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync } from 'fs';
+import { dirname, basename, join } from 'path';
+import { checkStepCoverage, checkBannedPatterns, checkLiveness, checkLocatorRedundancy } from './checks.mjs';
 import { playwright } from './playwright.mjs';
-import { testSteps } from './spec-ast.mjs';
-
-/**
- * Step title -> the line the *first* step with that title opens on.
- *
- * Duplicate titles are ordinary rather than exceptional: two scenarios opening
- * with the same Given is plain Gherkin, and a Background step is prepended to
- * every scenario, so a feature with a Background guarantees them. `new Map(...)`
- * over the pairs keeps the last of each, which is the wrong end — a fault
- * reported by title then resolved to a later copy, and the cut computed from it
- * left the offending step itself sitting inside the prefix. That is precisely
- * what the cutoff exists to exclude, arriving through the other door.
- */
-function firstLineByTitle(specPath) {
-  const byTitle = new Map();
-  for (const step of testSteps(specPath)) {
-    if (!byTitle.has(step.title)) byTitle.set(step.title, step.line);
-  }
-  return byTitle;
-}
-
-/**
- * The first line any gate objected to, so a retry can replay the untouched
- * prefix instead of re-driving the whole feature through the agent again.
- *
- * `liveness` reports step titles, not lines — the same shape `checkLiveness`
- * already returns — so it is resolved back to a line through the spec's own
- * `test.step` titles, the same title text `checkStepCoverage` matches on.
- */
-function earliestLine(specPath, { coverage, banned, liveness, redundancy }) {
-  // A spec that skipped a feature step has no prefix worth keeping. The gap is
-  // not a bad line, so a line-based answer cannot see it: cutting anyway leaves
-  // the missing step inside the seed, and the retry is told to pick up after
-  // the cut — so the same coverage rejection comes back every attempt until
-  // they run out. "No prefix" is the honest answer to a hole.
-  if (!coverage.ok) return null;
-
-  const lines = [
-    ...banned.hits.map(h => h.line),
-    ...redundancy.naked.map(n => n.line),
-  ];
-  if (liveness.naked.length) {
-    const byTitle = firstLineByTitle(specPath);
-    for (const title of liveness.naked) {
-      const line = byTitle.get(title);
-      if (line !== undefined) lines.push(line);
-    }
-  }
-  return lines.length ? Math.min(...lines) : null;
-}
+import { renderSpec } from './render-spec.mjs';
+import { readTrace, featureToTrace } from './trace.mjs';
+import { featureToSpec } from './paths.mjs';
 
 const STEP_REPORT = '.step-report.json';
+
+/** The tail of a replay-failure critique — the generic "why it went red" advice. */
+const REPLAY_TAIL = '\n\nThis is the run failing against the live page, so the problem is in the recording itself'
+  + ' — a locator that was never really there, a wait that was never really needed, or a step'
+  + ' performed in the wrong order.';
+
+/**
+ * The tail swapped in when the failure is a uniqueness-check count mismatch —
+ * a candidate matched more than one element. This is directly actionable, unlike
+ * the generic tail, so it points the agent at the count rule it skipped.
+ */
+const COUNT_TAIL = '\n\nA locator candidate on this step matched more than one element (see the count above:'
+  + ' Received > 1). That is the uniqueness rule going unmet — per your Locators rules, count every'
+  + ' candidate for this step to exactly one with browser_evaluate, and rewrite the non-unique one with a'
+  + ' distinguishing scope (a name, a parent, or the row/card\'s own text via .filter({ hasText })).'
+  + ' Then retrace from this step and re-record it.';
+
+/** Does a critique's failure detail look like a toHaveCount(1) mismatch? */
+export function isCountMismatch(critique) {
+  return /Expected:\s*1\b/.test(critique) && /Received:\s*[2-9]/.test(critique);
+}
 
 /**
  * Every rejection reports what already passed alongside what failed.
@@ -88,12 +63,45 @@ function reject(passed, body, failed = []) {
 }
 
 /**
- * Gates 1–3: text only, milliseconds, no browser.
+ * The one static gate a recording must clear: every feature step has a matching
+ * `test.step`.
  *
- * Split from the replay gate so they can run on their own — over specs recorded
- * long ago, in CI, or while iterating on the rules themselves. Gates that only
- * run at recording time never revisit what they let through, so a rule added
- * later silently exempts everything already in the repository.
+ * Coverage catches the agent skipping a step — a missing record renders as a
+ * missing test.step, which the renderer cannot detect on its own — so it is a
+ * hard gate on the recording path. Locator and assertion shape are the renderer's
+ * responsibility (render-spec.mjs builds the spec from a template), so those are
+ * not re-checked here.
+ *
+ * The full static suite lives in `staticGates`, which the `check` command runs
+ * to audit specs already on disk (human-edited specs, where shape can vary).
+ */
+export function coverageGate(featurePath, specPath) {
+  const coverage = checkStepCoverage(featurePath, specPath);
+  if (coverage.ok) {
+    return { ok: true, passed: [`step coverage ${coverage.found}/${coverage.wanted}`], failed: [], critique: null };
+  }
+  const body = coverage.empty
+    ? `${featurePath} states no steps, so there is nothing for a recording to verify.`
+      + ` A coverage check would clear it at 0/0 and let a spec that proves nothing through.`
+      + ` Write the scenario's steps, or delete the feature.`
+    : `${coverage.missing.length} feature step(s) have no matching test.step:\n`
+      + coverage.missing.map(m => `  - ${m}`).join('\n')
+      + `\n\nEvery step of the scenario must be recorded, so it renders as`
+      + ` \`await test.step('<step text verbatim>', ...)\`. The record's step text has`
+      + ` to match the feature step exactly, Gherkin keyword and all.`;
+  return reject([], body, ['step coverage']);
+}
+
+/**
+ * The full static suite: text only, milliseconds, no browser — coverage, banned
+ * patterns, liveness, locator redundancy, reported together.
+ *
+ * This is the engine of the `check` command, which audits specs already on disk
+ * (human-edited specs, where locator and assertion shape can vary). It runs over
+ * a spec wherever it sits, so a rule added later revisits everything in the
+ * repository rather than silently exempting what predates it.
+ *
+ * The recording path uses `coverageGate` + replay instead (see runGates).
  *
  * @returns {{ ok: boolean, passed: string[], critique: string|null }}
  */
@@ -157,11 +165,10 @@ export async function staticGates(featurePath, specPath) {
   }
 
   if (failures.length) {
-    return { ...reject(passed, failures.join('\n\n'), failed),
-      earliestLine: earliestLine(specPath, { coverage, banned, liveness, redundancy }) };
+    return reject(passed, failures.join('\n\n'), failed);
   }
 
-  return { ok: true, passed, failed: [], critique: null, earliestLine: null };
+  return { ok: true, passed, failed: [], critique: null };
 }
 
 /**
@@ -169,7 +176,7 @@ export async function staticGates(featurePath, specPath) {
  *
  * `status` is Playwright's own verdict string. Only failed and timedOut count
  * as red — skipped, interrupted and expected-to-fail do not, because a spec in
- * any of those states has no broken locator to heal.
+ * any of those states has no broken locator to repair.
  */
 export function redSpecsFrom(tests) {
   return [...new Set(
@@ -184,11 +191,20 @@ export function redSpecsFrom(tests) {
  * detail survives only in the step/test records it wrote — never on
  * stdout/stderr. A critique that says only "it does not replay" gives the
  * producer nothing to fix, so the step and test errors are named here.
+ *
+ * The first line is usually the assertion/locator name; for a count mismatch
+ * (`toHaveCount`) Playwright puts the numbers on later `Expected:`/`Received:`
+ * lines, so those are carried along too — that is what lets a uniqueness failure
+ * be recognised and its critique sharpened.
  */
 function describeFailures(tests, steps) {
   const lines = [];
   for (const s of steps) {
-    if (!s.ok && s.error) lines.push(`step "${s.title}": ${s.error.split('\n')[0]}`);
+    if (!s.ok && s.error) {
+      const errLines = s.error.split('\n');
+      const extra = errLines.filter(l => /^\s*(Expected|Received):/.test(l));
+      lines.push(`step "${s.title}": ${[errLines[0], ...extra].join(' ')}`);
+    }
   }
   for (const t of tests) {
     if ((t.status === 'failed' || t.status === 'timedOut') && t.error) {
@@ -197,6 +213,8 @@ function describeFailures(tests, steps) {
   }
   return lines.join('\n');
 }
+
+export { describeFailures };
 
 /**
  * Gates 4–5: replay the spec(s) for real, then check what the run actually did.
@@ -218,58 +236,92 @@ export function replayGate(specPaths) {
   let recorded = { steps: [], tests: [] };
   try { recorded = JSON.parse(readFileSync(STEP_REPORT, 'utf8')); } catch { /* handled below */ }
   if (existsSync(STEP_REPORT)) unlinkSync(STEP_REPORT);
-  // The reporter writes `{ steps, tests }`. `steps` feeds the substance gate;
-  // `tests` names which spec files went red, so healing can touch only those.
-  const steps = Array.isArray(recorded) ? recorded : (recorded.steps ?? []);
-  const tests = Array.isArray(recorded) ? [] : (recorded.tests ?? []);
+  // The reporter writes `{ steps, tests }`. `tests` names which spec files went
+  // red, so a repair run can touch only those; `steps` carries the per-step
+  // titles a resume maps its failure back to.
+  const steps = recorded.steps ?? [];
+  const tests = recorded.tests ?? [];
 
   if (run.status !== 0) {
     // The custom reporter swallows Playwright's own output, so the reason lives
     // in the step/test records above — stdout/stderr is only the fallback.
     const detail = describeFailures(tests, steps) || `${run.stdout ?? ''}${run.stderr ?? ''}`.trim();
     const redSpecs = redSpecsFrom(tests);
-    // Same reasoning as the static gates' earliestLine: a step that failed to
-    // replay names itself in `steps[].title`, the same title text a test.step
-    // is written with, so a retry can still replay the untouched prefix
-    // instead of re-driving steps that never had anything wrong with them.
-    const failedTitles = new Set(steps.filter(s => !s.ok && s.error).map(s => s.title));
-    let earliestLine = null;
-    if (failedTitles.size && specPaths.length === 1) {
-      const byTitle = firstLineByTitle(specPaths[0]);
-      const lines = [...failedTitles].map(t => byTitle.get(t)).filter(l => l !== undefined);
-      if (lines.length) earliestLine = Math.min(...lines);
-    }
+    // A step that failed to replay names itself in `steps[].title`, the same
+    // title text a trace record carries — so the recorder maps these back to the
+    // trace record that failed and resumes from there, keeping the clean prefix
+    // (resumeIndexFromFailures / truncateTrace in trace.mjs) instead of
+    // re-driving steps that never had anything wrong with them.
+    const failedTitles = [...new Set(steps.filter(s => !s.ok && s.error).map(s => s.title))];
     return { ...reject(passed, `the recorded spec does not replay:\n\n${detail.slice(0, 2500)}`
-      + `\n\nThis is the run failing against the live page, so the problem is in the recording itself`
-      + ` — a locator that was never really there, a wait that was never really needed, or a step`
-      + ` performed in the wrong order.`, ['replay']), redSpecs, earliestLine };
+      + REPLAY_TAIL, ['replay']),
+      redSpecs, failedTitles };
   }
   passed.push('replays green');
 
-  // Playwright exiting 0 is too weak on its own: a skipped test, a test with no
-  // assertions and an empty test.step all exit 0. Seeing zero steps means the
-  // reporter never ran, which is a tool failure, not a passing suite.
+  // Playwright exiting 0 is too weak on its own: a skipped test and a test that
+  // did nothing both exit 0. Seeing zero steps means the reporter never ran,
+  // which is a tool failure, not a passing suite — kept as an inconclusive.
   if (!steps.length) {
     return { ok: false, passed, failed: [], critique: null,
       inconclusive: 'the step reporter produced nothing — Playwright exited 0 but no test.step was observed' };
   }
-  const substance = checkStepSubstance(steps);
-  if (!substance.ok) {
-    return reject(passed, `${substance.empty.length} test.step ran but performed no action, assertion or attachment:\n`
-      + substance.empty.map(e => `  - ${e.title}`).join('\n')
-      + `\n\nAn empty step reads as coverage while proving nothing. If the step only asks for something`
-      + ` to be looked at, attach the evidence inside it with testInfo.attach and a screenshot.`, ['step substance']);
-  }
-  passed.push(`${substance.total} steps, none empty`);
 
-  return { ok: true, passed, failed: [], critique: null, stepCount: substance.total };
+  return { ok: true, passed, failed: [], critique: null, stepCount: steps.length };
 }
 
-/** All five gates, cheapest first — what a recording has to clear. */
-export async function runGates(featurePath, specPath) {
-  const stat = await staticGates(featurePath, specPath);
-  if (!stat.ok) return stat;
+/**
+ * The uniqueness-check replay: replay a spec whose every action locator carries
+ * a per-candidate `toHaveCount(1)` assertion, so a non-unique candidate reds in
+ * the locating layer (naming the candidate and its count) instead of as an opaque
+ * strict-mode throw when the action runs.
+ *
+ * The check spec is rendered fresh from the trace with `checkLocators:true` and
+ * written to a dot-hidden sibling of the promoted spec — `listSpecs` excludes dot
+ * files, so it is invisible to `status`/`pairing`/`replay` and can never be
+ * mistaken for a recording or written into `.red-specs.json`. It is removed in a
+ * `finally`, and being dot-hidden a crash-leftover trips nothing.
+ *
+ * On a count-mismatch failure the generic replay critique tail is swapped for one
+ * that points at the uniqueness rule — the piece that makes the failure
+ * actionable for the agent.
+ */
+export function uniquenessReplayGate(featurePath) {
+  const promoted = featureToSpec(featurePath);
+  const checkSpec = join(dirname(promoted), '.' + basename(promoted).replace(/\.spec\.ts$/, '.check.spec.ts'));
+  try {
+    writeFileSync(checkSpec, renderSpec(readTrace(featurePath), { checkLocators: true }));
+    const verdict = replayGate([checkSpec]);
+    // The check spec is a throwaway; a run must never surface its path. Replace
+    // the file it names in redSpecs with the promoted spec, and sharpen the
+    // critique when the failure is a uniqueness (count) mismatch.
+    if (!verdict.ok && verdict.critique) {
+      if (isCountMismatch(verdict.critique)) {
+        verdict.critique = verdict.critique.replace(REPLAY_TAIL, COUNT_TAIL);
+      }
+    }
+    if (verdict.redSpecs?.length) verdict.redSpecs = [promoted];
+    return verdict;
+  } finally {
+    if (existsSync(checkSpec)) unlinkSync(checkSpec);
+  }
+}
 
-  const rep = replayGate([specPath]);
-  return { ...rep, passed: [...stat.passed, ...rep.passed] };
+/**
+ * What a recording has to clear: coverage, then the uniqueness-check replay.
+ *
+ * The renderer owns the spec's shape, so the recording path checks the two things
+ * it cannot vouch for: that no feature step was skipped (coverage, over the
+ * promoted spec), and that the spec runs green against the live page with every
+ * action locator proven unique (the injected replay). The injected replay is a
+ * strict superset of a plain replay — it runs the real actions and proves each
+ * action locator matches exactly one element the instant before it is used — so
+ * it replaces the plain replay rather than adding a second run.
+ */
+export async function runGates(featurePath, specPath) {
+  const cov = coverageGate(featurePath, specPath);
+  if (!cov.ok) return cov;
+
+  const rep = uniquenessReplayGate(featurePath);
+  return { ...rep, passed: [...cov.passed, ...rep.passed] };
 }

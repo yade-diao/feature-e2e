@@ -1,0 +1,38 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "External knowledge links",
+  "description": "Maps a project (the first directory under tests/features) to the external knowledge repository and areas it draws on. The only committed file that names a specific external repo — and it names only a repo/URL and area folder names, never the product detail those areas contain. Populate `projects` per project, e.g. \"rgm\": { \"repo\": \"rgm/rgm-e2e-knowledge\", \"url\": \"https://github.tools.sap/rgm/rgm-e2e-knowledge.git\", \"areas\": [\"kpi\", \"profiles\"], \"conventions\": true }.",
+  "type": "object",
+  "required": ["version", "projects"],
+  "properties": {
+    "$schema": { "type": "string" },
+    "version": { "type": "string" },
+    "projects": {
+      "type": "object",
+      "description": "Keyed by project name (matches src/paths.mjs projectOf).",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "repo": {
+            "type": "string",
+            "description": "owner/name for `gh repo clone` (honours host auth)."
+          },
+          "url": {
+            "type": "string",
+            "description": "Clone URL, used as a fallback when gh is unavailable."
+          },
+          "areas": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "areas/<area>/{manuals,workflows}/** to pull."
+          },
+          "conventions": {
+            "type": "boolean",
+            "description": "Pull all conventions/*.md (cross-cutting). Defaults to true."
+          }
+        },
+        "anyOf": [{ "required": ["repo"] }, { "required": ["url"] }]
+      }
+    }
+  }
+}

@@ -22,7 +22,7 @@ export function logAttempt(entry) {
   } catch { /* measurement must never break the thing it measures */ }
 }
 
-export function readAttempts() {
+function readAttempts() {
   if (!existsSync(FILE)) return [];
   return readFileSync(FILE, 'utf8').split('\n').filter(Boolean)
     .map(l => { try { return JSON.parse(l); } catch { return null; } })

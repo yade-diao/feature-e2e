@@ -86,3 +86,28 @@ export function readFeature(featurePath) {
 export function allSteps(featurePath) {
   return readFeature(featurePath).scenarios.flatMap(s => s.steps);
 }
+
+/**
+ * The environment origin a feature already names, or null.
+ *
+ * A login feature carries the entry page URL in its data table (the `Url` column
+ * of the "login with authorized user" step). That URL *is* the environment under
+ * test, so BASE_URL should come from it rather than from an env var a caller has
+ * to remember to set — a forgotten BASE_URL used to point the whole run at an
+ * unrelated public site. `cli` reads this as the fallback when BASE_URL is unset.
+ *
+ * We scan the raw feature text (not the parsed steps) because the URL lives in a
+ * table cell, which `readFeature` does not expose, and take the first http(s)
+ * URL's origin — the entry page is the first URL a feature mentions. Returns null
+ * when the feature names no URL, so the caller can fall back to erroring.
+ */
+export function baseUrlFromFeature(featurePath) {
+  const text = readFileSync(featurePath, 'utf8');
+  const m = text.match(/https?:\/\/[^\s|)'"]+/);
+  if (!m) return null;
+  try {
+    return new URL(m[0]).origin;
+  } catch {
+    return null;
+  }
+}

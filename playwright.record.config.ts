@@ -1,7 +1,21 @@
 import { defineConfig, devices } from '@playwright/test';
 
 /**
- * Config for the playwright-test MCP server only (record/heal), never for
+ * The origin under test, from BASE_URL. Fail loudly if it is unset rather than fall
+ * back to some placeholder host: a missing BASE_URL used to default to a real,
+ * unrelated public site, so a run silently opened the wrong page and looked broken.
+ * An explicit error names the fix instead of pretending to work.
+ */
+function baseOrigin(): string {
+  const raw = process.env.BASE_URL;
+  if (!raw) {
+    throw new Error('BASE_URL is not set — export BASE_URL=<entry page URL> (e.g. https://your-env.example.com/) before recording.');
+  }
+  return new URL(raw).origin;
+}
+
+/**
+ * Config for the playwright-test MCP server only (record), never for
  * replay. This environment requires a client certificate; bundled Chromium
  * cannot read it from the macOS Keychain and blocks every navigation on a
  * "select a certificate" dialog. Real Chrome (`channel: 'chrome'`) can read
@@ -13,12 +27,12 @@ import { defineConfig, devices } from '@playwright/test';
  * Keychain issue is local-machine-only: CI runners have no such certificate.
  */
 export default defineConfig({
-  testDir: './tests/run',
+  testDir: './run',
   timeout: 120_000,
   expect: { timeout: 15_000 },
 
   use: {
-    baseURL: new URL(process.env.BASE_URL ?? 'http://www.people.com.cn/').origin,
+    baseURL: baseOrigin(),
     locale: 'zh-CN',
     viewport: { width: 1440, height: 900 },
     trace: 'on-first-retry',

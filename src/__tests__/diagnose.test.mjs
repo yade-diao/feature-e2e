@@ -12,14 +12,14 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { validateDiagnosis, renderDiagnosis, reportPaths } from '../diagnose.mjs';
+import { validateDiagnosis, renderDiagnosis, reportPaths, detectCascade } from '../diagnose.mjs';
 
 const VALID = {
   report_version: '1.0',
   id: 'recruit-search-20260820-a1b2c3',
   created_at: '2026-08-20T10:00:00Z',
   stage: 'verify',
-  feature: 'tests/features/recruit/search.feature',
+  feature: 'features/recruit/search.feature',
   diagnoses: [{
     scenario: 'Narrow the list with a keyword',
     step: 'Then the list shows at most 10 openings',
@@ -84,8 +84,61 @@ test('diagnosis: render produces markdown naming the feature and the verdict', (
 });
 
 test('diagnosis: reportPaths maps a feature to a project-scoped path', () => {
-  const p = reportPaths('tests/features/recruit/search.feature');
+  const p = reportPaths('features/recruit/search.feature');
   assert.ok(p.json.endsWith('search.diagnosis.json'));
   assert.ok(p.md.endsWith('search.diagnosis.md'));
   assert.ok(p.json.includes('recruit'));
+});
+
+// ── cascade detection (advisory) ──────────────────────────────────────────────
+
+test('cascade: a single diagnosis is never a cascade', () => {
+  assert.equal(detectCascade(VALID).likelyCascade, false);
+});
+
+test('cascade: downstream timeouts after a substantive first failure are flagged', () => {
+  const r = structuredClone(VALID);
+  r.diagnoses = [
+    {
+      scenario: 'S', step: 'When the applicant submits the form',
+      verdict: { category: 'backend', summary: 'the create endpoint returned 500', confidence: 'high' },
+      attempt: { steps_completed: 2, obstacle: 'the save failed' },
+      evidence: [{ type: 'network', target: 'POST /api/create', status: 500, finding: 'server error' }],
+    },
+    {
+      scenario: 'S', step: 'Then the new item is shown',
+      verdict: { category: 'frontend', summary: 'the item never appeared', confidence: 'low' },
+      attempt: { steps_completed: 2, obstacle: 'timed out waiting for the row' },
+      evidence: [{ type: 'dom', finding: 'no such element' }],
+    },
+    {
+      scenario: 'S', step: 'Then the count increases',
+      verdict: { category: 'frontend', summary: 'the counter was not found', confidence: 'low' },
+      attempt: { steps_completed: 2, obstacle: 'element not found, timeout' },
+      evidence: [],
+    },
+  ];
+  const c = detectCascade(r);
+  assert.equal(c.likelyCascade, true);
+  assert.match(c.note, /submits the form/);   // names the first, substantive step
+});
+
+test('cascade: genuinely independent failures are not flagged', () => {
+  const r = structuredClone(VALID);
+  r.diagnoses = [
+    {
+      scenario: 'S', step: 'When the applicant submits the form',
+      verdict: { category: 'backend', summary: 'the create endpoint returned 500', confidence: 'high' },
+      attempt: { steps_completed: 2, obstacle: 'the save failed' },
+      evidence: [{ type: 'network', status: 500, finding: 'server error' }],
+    },
+    {
+      scenario: 'S', step: 'Then the price is correct',
+      verdict: { category: 'backend', summary: 'the price was off by a cent', confidence: 'high' },
+      attempt: { steps_completed: 4, obstacle: 'assertion mismatch on the total' },
+      evidence: [{ type: 'assertion', finding: 'expected 9.99 got 9.98' }],
+    },
+  ];
+  // The second failure carries substantive assertion evidence — not a consequence.
+  assert.equal(detectCascade(r).likelyCascade, false);
 });

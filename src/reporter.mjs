@@ -20,7 +20,7 @@ export default class StepReporter {
   constructor() { this.steps = []; this.tests = []; }
 
   onTestEnd(test, result) {
-    // Normalise to a repo-relative path (tests/run/...) so the red-spec list can
+    // Normalise to a repo-relative path (run/...) so the red-spec list can
     // be mapped back to a feature no matter how Playwright resolved the file.
     // The separator is forced to `/` so the recorded path is stable whether the
     // node binary is the Windows one or the POSIX one.

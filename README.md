@@ -16,17 +16,20 @@ end-to-end test verifies **is** business logic. The pipeline is:
    verified, the agent writes a diagnosis: *why* it cannot be verified, and
    where the fault lies — a missing component, a backend returning wrong data.
    Those are examples; the real causes are many.
-3. **Distill.** The agent records everything it does while verifying. Playwright
-   already produces a trace, but the trace cannot be replayed as-is: the agent
-   explored, made invalid operations, and may have pinned a component with a
-   single random id that breaks the moment the source changes. The replay
-   therefore keeps only the effective operations.
+3. **Record a trace.** As it verifies, the agent emits one structured record per
+   step — what it did, several ways to locate each element, what the step should
+   assert. A deterministic renderer compiles that trace into the spec, so the
+   spec's shape is the renderer's, not a model's.
 4. **Locate stably.** Every component is located through several strategies at
    once, so that when one stops matching, the rest still cover it.
-5. **Heal.** When every strategy fails, a healing agent repairs the locator. If
-   the repair succeeds, the locator is rewritten the same way — multiple
-   strategies with fallbacks. If the repair fails, the same diagnosis is
-   written: why the business logic cannot be verified, and where the fault lies.
+5. **Repair.** When a recorded spec goes red — a locator no longer matches, the
+   page drifted — `record` runs again in *Mode B*: the same verify agent follows
+   the existing spec/trace, reuses the steps that still hold, and takes over at
+   the first that does not, re-recording it the same way (multiple strategies,
+   fallbacks) against the live page. If a step's business logic cannot be
+   verified at all, the same diagnosis is written: why it cannot be verified, and
+   where the fault lies. There is no separate healing agent — repair is recording
+   with a reference to work from.
 
 In short: **we care only about business logic.** Everything else — ids, classes,
 DOM shape — merely hangs off the business logic, and we do not care about it.
@@ -34,50 +37,54 @@ DOM shape — merely hangs off the business logic, and we do not care about it.
 ## The pipeline
 
 ```
-tests/features/recruit/search.feature        business intent, written by a human
+features/recruit/search.feature              business intent, written by a human
         │
         │   npm run record
         │   the verify agent walks each step in a live browser and checks that
-        │   the business logic holds; the generator distills the effective
-        │   actions (not the exploration) into a spec with redundant locators
+        │   the business logic holds, emitting one structured trace record per
+        │   step; a deterministic renderer compiles the trace into a spec with
+        │   redundant locators
         ▼
-tests/run/recruit/search.spec.ts             distilled, not a raw trace
+run/recruit/search.spec.ts                    compiled from the trace, not a raw trace
         │
         │   npm run replay        pure Playwright, zero model calls
         ▼
 E2E regression in CI
 
-        │   when a locator no longer matches anything on the page
-        │   npm run heal          the healer agent re-locates it, redundantly
+        │   when a spec goes red — a locator no longer matches on the page
+        │   npm run record        the verify agent follows the existing spec/trace
+        │                         (Mode B) and takes over where it stops holding
         ▼
-the same spec, self-repaired — or a diagnosis if the page itself changed
+the same spec, re-recorded from the drifted step — or a diagnosis if the page itself changed
 ```
 
 Two failure paths converge on the same artifact, a **diagnosis**:
 
-- The verify agent cannot verify a piece of business logic → it writes a
-  diagnosis naming the fault and attributing it.
-- The healer cannot repair a locator (because the page itself changed) → it
-  writes the same diagnosis.
+- The verify agent cannot verify a piece of business logic — on a first recording
+  or a Mode B repair → it writes a diagnosis naming the fault and attributing it.
+- A red spec cannot be repaired because the page changed beyond re-location → the
+  same diagnosis, written by the same agent.
 
-## Why record instead of generate
+## Why a trace and a renderer
 
-A selector that came out of a recorder is one that *hit a real element on the
-live page*. A selector a model typed into a file is a guess that happens to look
-plausible. Read side by side the two are indistinguishable — only their
-provenance differs, and only one of them still works tomorrow.
+A locator the agent records is one that *hit a real element on the live page*. A
+locator a model types into a spec is a guess that happens to look plausible — read
+side by side the two are indistinguishable, and only one still works tomorrow. So
+the agent never writes the spec: it supplies data the page proved (a trace), and a
+deterministic renderer owns the code.
 
-So this project never asks a model to write a spec. It hands the feature to
-Playwright's official test agents and lets the generator write the file:
+The split puts each concern with whoever can be trusted for it:
 
 | Concern | Owner |
 |---|---|
-| Driving the browser, verifying each step, choosing selectors, emitting code | Playwright's test agents (`generator_setup_page`, `browser_*`, `generator_write_test`) |
-| Distilling the trace into effective operations | the generator journal — exploration tools stay out of it by design |
+| Driving the browser, verifying each step, choosing locators | the verify agent, in a real browser via Playwright's MCP tools |
+| Recording each step as a structured trace record | the verify agent (`node src/cli.mjs record-step`), which validates each record as it lands |
+| Compiling the trace into a spec — locator chains, dynamic values, no banned patterns | `src/render-spec.mjs`, deterministic |
 | How to verify, what a good locator is, what may not be done to the page | `.claude/agents/verify.md`, the hand-written agent definition |
 | Diagnosing an unverifiable step | the verify agent; the per-run prompt is built in `src/recorder.mjs` |
-| Repairing a stale locator | the healer agent (`browser_generate_locator`), via `npm run heal` |
+| Repairing a red spec | the verify agent in Mode B (`npm run record`), following the existing spec/trace |
 | feature ↔ spec mirroring, suite completeness | `src/paths.mjs` |
+| The trace: its shape, validation, and resume prefix | `src/trace.mjs` |
 | Acceptance gates | `src/gates.mjs`, `src/checks.mjs`, `src/spec-ast.mjs` |
 | Orchestration and exit codes | `src/cli.mjs` |
 | Replay | Playwright |
@@ -121,105 +128,62 @@ await row.getByRole('combobox', { name: 'Pricing Method' }).click();
 
 ## Acceptance gates
 
-A file on disk proves nothing, so `record` is not finished until every gate
-passes, cheapest first:
+A file on disk proves nothing, so `record` is not finished until two gates pass:
 
-| # | Gate | Cost | Rejects |
-|---|---|---|---|
-| 1 | Step coverage | text, ms | a recording that skipped a feature step, or a feature that states none |
-| 2 | Lint | text, ms | shapes that pass today and lie later (see below) |
-| 3 | Liveness | text, ms | a step that only asserts absence, which a blank page satisfies |
-| 4 | Locator redundancy | text, ms | an action locator with no fallback chain |
-| 5 | Replay | one real run | selectors that were never on the page |
-| 6 | Step substance | free, rides on 5 | a `test.step` that ran and did nothing |
+| Gate | Cost | Rejects |
+|---|---|---|
+| Step coverage | text, ms | a recording that skipped a feature step, or a feature that states none |
+| Replay | one real run | a spec that does not run green against the live page |
 
-Gates 1–4 are text-only and run together, not one at a time: all four report at
-once so a single retry can fix everything that is wrong, instead of one fault per
-round. Gates 5 and 6 need a browser and run only after the first four are clear.
+The recording path checks only these two, because the renderer owns everything
+else. A banned pattern, an action locator with no fallback, an absence assertion
+with no liveness — the renderer cannot emit those shapes (`src/render-spec.mjs`),
+so re-checking them at record time would reject the agent for a bug it cannot
+cause. What is left is the two things the renderer cannot vouch for: that no step
+was skipped, and that the spec runs green — replay being the only check that
+catches a locator matching zero or many elements, which no static rule sees.
 
-Gate 1 matches each feature step against a `test.step` title, exactly, after
+Coverage matches each feature step against a `test.step` title, exactly, after
 normalising whitespace and quotes. A fuzzy match would let a step drift away from
 what the feature asked while still reporting coverage. A feature with no steps is
-rejected by name — it would otherwise clear coverage at 0/0 and let through a
-spec that verifies nothing.
+rejected by name — it would otherwise clear coverage at 0/0 and let through a spec
+that verifies nothing.
 
-Gate 2 is `eslint-plugin-playwright`, configured in `eslint.config.mjs` and
-parsed with `@typescript-eslint/parser`. The rules enabled are the ones that
-catch something *silent*: an assertion that was never awaited never fails, a test
-with no assertions passes by definition, `.only` shrinks the suite while still
-exiting 0.
+An empty step — one that neither acts nor asserts — never reaches a spec: a trace
+record with no action and no assertion is refused as it is recorded
+(`src/trace.mjs`), rather than surfacing a whole replay later.
 
-One rule has no plugin equivalent and is written by hand: an absolute URL in
-`goto()` is an error, because a scheme and host pin the recording to the
-environment it was made on. Navigate with the path and let `baseURL` decide the
-origin.
-
-`no-raw-locators` is deliberately **not** enabled: it would ban
-`page.locator('some-custom-element')`, and measurements on a real site put
-custom-element tags ahead of role-based locators for precision.
-
-Gate 3 exists because "at most 10 rows" is satisfied by zero rows and "no row
-lacks the keyword" is satisfied by no rows at all. A step built only from
-absences passes on a blank page — the thing it was written to catch. It is
-classified by matcher rather than by wording, so it holds for a feature written
-in any language.
-
-Gate 4 exists because a locator that survives only one way fails the first time
-that one way changes. An action that clicks, types or navigates must carry a
-fallback, or be pure accessibility semantics. Assertions are deliberately not
-checked: an assertion that fails is the point, and a fallback there would let it
-match some near element and go green while the component it watched is gone.
-
-Gate 6 exists because an empty step reads as coverage while proving nothing.
-Steps are *not* required to assert: a step that only asks for something to be
-looked at can satisfy it by attaching the evidence.
-
-```ts
-await test.step('Then the article page shows a headline', async () => {
-  await testInfo.attach('headline', { body: await page.screenshot(), contentType: 'image/png' });
-});
-```
-
-**`replay` runs gates 5 and 6 too.** An exit code alone is too weak: a skipped
-test, a test with no assertions, and an empty `test.step` all exit 0.
-
-Two further checks are **audits, not gates** — `check` lists them as notes and
-never rejects on them, because both are strong signals rather than proof and a
-false rejection would block a recording that did nothing wrong:
+The full static suite — coverage, lint, liveness, locator redundancy — still runs
+as `npm run check`, which audits specs already on disk (see *Use*). Two further
+checks are audits there, listed as notes and never rejected on, because each is a
+strong signal rather than proof and a false rejection would block a recording that
+did nothing wrong:
 
 - **stale data** — strings the spec names that the feature never quoted, and that
   read as page content. See *Known limitation* below.
 - **brittle locators** — generated class names that will break on the next build.
 
+The lint rules live in `eslint.config.mjs`, parsed with `@typescript-eslint/parser`
+and enforced by `eslint-plugin-playwright`. They catch what passes today and lies
+later: an assertion never awaited, a test with no assertions, `.only` shrinking the
+suite while exiting 0, `.first()`/`.nth()`/`.last()` pinned to DOM order. One rule
+is hand-written — an absolute URL in `goto()` is an error, because a scheme and
+host pin the recording to the environment it was made on; navigate with the path
+and let `baseURL` decide the origin.
+
 ### When a gate rejects
 
-The recording is not simply refused. The reason — which rule, which line, what to
-do instead — is fed back as a critique and the scenario is recorded again, up to
-three attempts. Every rejection also names what already passed, so a retry does
-not fix the fault and drop what it had got right the round before.
+The recording is not simply refused. The reason — which rule, what to do instead —
+is fed back as a critique and the scenario is recorded again, up to three attempts.
+Every rejection also names what already passed, so a retry does not fix the fault
+and drop what it had got right the round before.
 
-Retrying is only safe because the text gates run first: "retry until green" would
-otherwise select for the emptiest possible recording, since a spec that asserts
-nothing always replays green. It cannot, however, get past step coverage.
-
-A retry does not start from scratch. The gates report the line each objection
-sits on, and the spec is cut at the last `test.step` that ends before the earliest
-of them; that truncated spec becomes the next attempt's seed. Playwright runs a
-seed for real, so the agent lands where the previous attempt left off and picks up
-at the step the rejection names, instead of re-driving steps nobody objected to.
-The seed sets its own timeout, because the server that runs it does not.
-
-The cut refuses more often than it makes one, and each refusal has a reason:
-
-- **the feature has more than one scenario** — a seed holds a single test.
-  Playwright pauses at the end of every test function and the generator attaches
-  at the first pause, so a seed carrying two would hand it the wrong page.
-- **a feature step is missing from the spec** — a hole in the prefix is not a bad
-  line in it, and cutting anyway would freeze the gap in for every later attempt.
-- **nothing complete sits before the cut**, or the result does not parse.
-
-Each of those falls back to the blank seed, which is what every retry did before
-any of this existed.
+A retry does not start from scratch. The trace persists across attempts: when
+replay names the step that went red, the trace is cut to the records before it,
+and the next attempt replays that clean prefix for real (the renderer compiles it
+into the seed) before the agent picks up at the failed step — instead of re-driving
+steps nobody objected to. A coverage failure, or a failure that maps to no recorded
+step, has no safe prefix and re-records from the start.
 
 `.recordings.jsonl` keeps a line per attempt, and `record` prints the
 first-attempt pass rate and a count of rejections per gate.
@@ -243,7 +207,7 @@ agent writes a structured report naming:
   "id": "search-2026-08-21-1",
   "created_at": "2026-08-21T03:06:45Z",
   "stage": "verify",
-  "feature": "tests/features/recruit/search.feature",
+  "feature": "features/recruit/search.feature",
   "diagnoses": [
     {
       "scenario": "Narrow the list with a keyword",
@@ -262,9 +226,40 @@ The verdict categories and evidence types are **closed enums**: an agent that
 could write any verdict would write a plausible one instead of a true one. The
 shape is `schemas/diagnosis.schema.json`; `src/diagnose.mjs` is its executable
 form, and a report the validator rejects is reported as invalid rather than filed
-as truth. Both stages write the same shape — `stage` is `verify` or `heal` — which
-is what lets one failure exit serve both. A report that validates is also
-rendered to `.diagnosis.md` beside the JSON, for a human to read.
+as truth. `stage` is `verify` — a first recording and a Mode B repair write the
+same shape, so one failure exit serves both. (`heal` remains a legal stage only
+so reports from the old healer agent still validate.) A report that validates is
+also rendered to `.diagnosis.md` beside the JSON, for a human to read.
+
+When a report emits several diagnoses whose downstream entries are all bare
+timeouts after one substantive first failure, `src/diagnose.mjs` attaches an
+advisory `note` — this looks like a cascade from the first failure, attribute
+the root cause to it alone. It is advisory only: causation cannot be proven from
+JSON, so it lists, it does not reject.
+
+## Knowledge
+
+The verify agent is given reference technique alongside the feature: how to
+prioritise locators, chain into a shadow-DOM input, wait on slow third-party
+content, commit a search, prove a write took effect, and read a cascade. This is
+background material, not a second rulebook — the agent definition still governs,
+and where a note restates a gate it points at the gate rather than inventing a
+divergent rule.
+
+Two layers, merged and injected per feature (keyed on its project):
+
+- **`knowledge/core/*.md`** — built-in, committed, always injected, and
+  deliberately **product-neutral**: no framework or product proper nouns. A lint
+  test enforces the neutrality. This is engine-general technique that holds for
+  any application under test.
+- **external** — product-specific detail lives in an external repository, never
+  here. `knowledge/links.json` maps a project to its repo and areas;
+  `npm run sync [project]` clones or pulls it into `knowledge/external/`
+  (gitignored, disposable, the remote is the source of truth).
+
+Loading is offline-safe — a missing external clone yields core-only rather than
+an error — and syncing is a separate, explicit step, never folded into `record`,
+so a recording never depends on the network.
 
 ## Setup
 
@@ -275,9 +270,11 @@ npm run setup:agents          # writes .claude/agents/* and .mcp.json
 ```
 
 `setup:agents` installs Playwright's official planner / generator / healer agent
-definitions and the MCP server they talk to. Only the healer is used by this
-project; the verify agent (`.claude/agents/verify.md`) is hand-written and
-committed, and the planner / generator are unused.
+definitions and, more to the point, the `.mcp.json` for the MCP server they talk
+to — that server is what this project needs. None of the generated agent
+definitions are used: recording and repair both run through the hand-written,
+committed verify agent (`.claude/agents/verify.md`); the planner, generator and
+healer are left unused.
 
 `patches/playwright+1.62.1.patch` is applied automatically by `postinstall`. It
 gives the test MCP server's browser backend explicit action, navigation and
@@ -300,7 +297,7 @@ under test rather than about yesterday's data.
 
 `playwright.config.ts` is the replay config and holds nothing model-related, so a
 red CI run is an honest regression signal. `playwright.record.config.ts` is a
-second config for the record/heal MCP server only: it runs real Chrome rather
+second config for the record MCP server only: it runs real Chrome rather
 than bundled Chromium, which is what an environment behind a client certificate
 needs — Chromium cannot read the certificate from the OS keychain and blocks
 every navigation on a "select a certificate" dialog. Point the server at it by
@@ -313,14 +310,16 @@ OS-specific.
 ```bash
 npm run status                      # which features have been recorded
 npm run check                       # text gates over the specs as they stand
-npm run record -- <feature|project> # verify + distill + gates
-npm run heal -- <feature|project>   # repair a spec whose locators stopped matching
+npm run record -- <feature|project> # verify + record + gates; repairs a red spec in Mode B
 npm run replay -- [feature|project] # no model calls
+npm run sync -- [project]           # pull external knowledge bases (see Knowledge)
 npm test                            # counterexamples for the gates themselves
 ```
 
 A target is a feature path, a project name (the first directory under
-`tests/features`), or nothing at all, which means every feature.
+`features`), or nothing at all, which means every feature. With no target,
+`record` also picks up the red-spec list a failed replay leaves behind and
+repairs just those, in Mode B.
 
 `check` matters because recording applies the gates once, when a spec is made. A
 rule added later would never revisit anything already committed.
@@ -333,7 +332,7 @@ Environment variables:
 | `STATIC_ROOT`, `STATIC_PORT` | `playwright.config.ts` | serve a directory over http, for recording a page that is a file on disk |
 | `RECORDER_DEBUG_FILE` | `src/recorder.mjs` | passes `--debug-file` to the agent; off unless set |
 | `CI` | `playwright.config.ts` | `forbidOnly`, retries, one worker, the html reporter |
-| `ANTHROPIC_API_KEY` | the healer, in CI | the only step of the workflow that spends a model call |
+| `ANTHROPIC_API_KEY` | the verify agent, in CI | the only step of the workflow that spends a model call (a Mode B repair) |
 
 Exit codes: `0` fine · `1` failed or missing · `2` the tool could not conclude.
 
@@ -370,39 +369,49 @@ behind the environment instead.
 
 ## Layout
 
+The feature corpus (`features/`) and everything a run produces (`run/`) both stay
+local — a recording only means something against the environment it was made on,
+and the features here carry that environment's login table. The tool is what
+ships; the seed spec is the one committed file under `run/`:
+
 ```
-tests/features/<project>/*.feature   input, written by a human
-tests/run/<project>/*.spec.ts        distilled output, written by the generator
-tests/run/seed.spec.ts               the page the generator starts from
+features/<project>/*.feature         input, written by a human — stays local
+run/<project>/*.spec.ts              the spec, compiled from the trace
+run/<project>/*.trace.jsonl          the trace the agent recorded, one record per line
+run/seed.spec.ts                     the page the agent starts from (committed)
 reports/<project>/*.diagnosis.json   structured diagnosis (the validated truth)
 reports/<project>/*.diagnosis.md     the same report, rendered for a human
 logs/<project>/<feature>/            browser scratch output, one subtree per feature
-schemas/diagnosis.schema.json        the shape both agents must write
-eslint.config.mjs                    gate 2 — the lint rules, also used by editors
+knowledge/core/*.md                  built-in, neutral technique injected into the agents
+knowledge/links.json                 per-project → external knowledge repo mapping
+knowledge/external/<repo>/           synced external knowledge (gitignored, disposable)
+schemas/diagnosis.schema.json        the shape a diagnosis must have
+eslint.config.mjs                    the lint rules, also used by editors
 playwright.config.ts                 replay: no model, nothing recording-specific
-playwright.record.config.ts          record/heal MCP server only
+playwright.record.config.ts          record MCP server only
 patches/                             applied on postinstall by patch-package
-src/cli.mjs                          status | check | record | heal | replay
+src/cli.mjs                          status | check | record | record-step | retrace | replay | sync
 src/paths.mjs                        feature ↔ spec mapping, pairing check
 src/feature.mjs                      Gherkin parsing (official parser)
 src/target.mjs                       BASE_URL split into origin + path
-src/recorder.mjs                     builds the verify prompt, invokes the agent
-src/healer.mjs                       invokes the healer agent to repair a locator
+src/recorder.mjs                     builds the verify prompt (Mode A/B), invokes the agent
+src/trace.mjs                        the trace: shape, validation, read/write, resume prefix, backup
+src/render-spec.mjs                  compiles a trace into a spec, deterministically
 src/gates.mjs                        the gates, and the critique each produces
-src/checks.mjs                       coverage, lint, liveness, redundancy, substance
+src/checks.mjs                       coverage, lint, liveness, locator redundancy
 src/spec-ast.mjs                     reads a spec off its parse, never off its text
 src/diagnose.mjs                     validates a diagnosis, renders it for a human
+src/knowledge.mjs                    loads/selects/syncs knowledge, injected into prompts
 src/reporter.mjs                     collects step structure during replay
 src/journal.mjs                      per-attempt measurements
 src/playwright.mjs                   runs Playwright without a shell
-src/__tests__/                       a counterexample for every gate
+src/__tests__/                       counterexamples for the gates and the renderer
 ```
 
-Only the tool is committed. The corpus — the `.feature` files and the specs
-recorded from them — and everything a run produces — `reports/`, `logs/`,
-`.recordings.jsonl` — stay local, because a recording only means something
-against the environment it was made on. `tests/run/seed.spec.ts` is the one
-exception: the generator needs it to open the application at all.
+Everything a run produces — the specs and traces under `run/`, `reports/`,
+`logs/`, `.recordings.jsonl` — stays local, because a recording only means
+something against the environment it was made on. `run/seed.spec.ts` is the one
+exception: the agent needs it to open the application at all.
 
 ## CI
 
@@ -412,13 +421,14 @@ Replay is plain Playwright: same input, same result, no API calls.
 
 The job runs `status`, then `npm test`, then `check`, then the replay. A red
 replay is not the verdict — it runs with `continue-on-error` and writes the list
-of red specs, and `heal` re-locates each failing element and re-runs only those;
-the green ones are not run a second time. A repair counts only when it replays
-green, and is then committed with `[skip ci]` so the whole workflow does not run
-again. Staging is limited to what healing may touch — the specs it rewrites and
-the diagnoses it writes — so the commit cannot claim more than happened. A spec
-the page has changed beyond re-location becomes a diagnosis report and the job
-stays red.
+of red specs, and `record` (with no target) reads that list and repairs just
+those in Mode B: the verify agent follows each red spec/trace and re-records from
+the step that drifted, so the green ones are not touched. A repair counts only
+when it replays green, and is then committed with `[skip ci]` so the whole
+workflow does not run again. Staging is limited to what a repair may touch — the
+specs and traces it rewrites and the diagnoses it writes — so the commit cannot
+claim more than happened. A spec the page has changed beyond re-location becomes
+a diagnosis report and the job stays red.
 
 So the job's colour carries the verdict: green means the business logic held (or
 was repaired — only a locator had drifted), red means it broke and a human has a
@@ -485,7 +495,3 @@ layer up — install a CJK font such as `fonts-wqy-zenhei`.
 The resolver is returning AAAA records for a host whose IPv6 path is dead, and
 `--dns-result-order=ipv4first` cannot help because there is no IPv4 answer to
 prefer. Use a registry whose DNS answers with IPv4.
-
-## License
-
-MIT — see [LICENSE](LICENSE).

@@ -20,7 +20,7 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { staticGates } from '../gates.mjs';
+import { staticGates, coverageGate, isCountMismatch, describeFailures } from '../gates.mjs';
 
 function fixture(featureBody, specBody) {
   const dir = mkdtempSync(join(tmpdir(), 'fe2e-gates-'));
@@ -67,74 +67,67 @@ test('rejection: a spec that clears every static gate names nothing', async () =
   f.cleanup();
 });
 
-/**
- * Counterexamples for the cut a rejection hands the next attempt.
- *
- * `earliestLine` is what lets a retry replay the prefix that was fine instead of
- * re-driving the whole feature. Both of these are ways it named a line that was
- * not safe to keep — and a cut that keeps the fault is worse than no cut, because
- * every remaining attempt inherits it.
- */
+// ── coverageGate: the recording path's only static gate ──────────────────────
+//
+// runGates dropped banned/liveness/redundancy — the renderer makes those shapes
+// unreachable on the recording path, so checking for them there rejects the
+// agent for a bug it cannot cause and render-spec's own tests already cover.
+// coverageGate is what runGates uses instead: coverage, and nothing else. These
+// pin that narrowing so it cannot silently regrow.
 
-/** The 1-based line a fragment first appears on. */
-const lineOf = (source, fragment) => source.slice(0, source.indexOf(fragment)).split('\n').length;
-
-test('cut: a spec that skipped a step offers no prefix at all', async () => {
-  // Coverage fails (one step of two is wrapped) and banned patterns fails on a
-  // line, so a cut was perfectly computable — and computing it would have frozen
-  // the missing step into the seed, where the retry is told not to touch it.
+test('coverageGate: a banned shape no longer blocks the recording path', async () => {
+  // A .first() would fail the old staticGates (banned patterns). coverageGate
+  // does not look at shape — only that every step is covered — so it passes.
   const f = fixture(
-    FEATURE(['Given a page', 'Then something is shown']),
+    FEATURE(['Given a page']),
     SPEC(`    await test.step('Given a page', async () => { await expect(page.getByRole('row').first()).toBeVisible(); });`));
 
-  const v = await staticGates(f.feature, f.spec);
+  const cov = coverageGate(f.feature, f.spec);
+  assert.equal(cov.ok, true, cov.critique ?? '');
 
-  assert.equal(v.ok, false);
-  assert.deepEqual(v.failed, ['step coverage', 'banned patterns']);
-  assert.equal(v.earliestLine, null,
-    'a missing step is a hole in the prefix, not a bad line in it — there is no '
-    + 'safe cut to offer, however many other gates reported one');
+  // And the full audit suite still catches it — the shape check lives on for
+  // the `check` command, it is just off the recording path.
+  const stat = await staticGates(f.feature, f.spec);
+  assert.equal(stat.ok, false);
+  assert.equal(stat.failed.includes('banned patterns'), true);
   f.cleanup();
 });
 
-test('cut: a repeated step title resolves to its first occurrence', async () => {
-  // A Background step is prepended to every scenario, so a feature with one
-  // guarantees repeated step text. Liveness reports the step by title, and the
-  // title has to resolve back to the copy that offends first — resolving to the
-  // last left the offending step sitting inside the prefix, which is exactly
-  // what the cut exists to exclude.
-  const feature = 'Feature: F\n'
-    + '  Background:\n'
-    + '    Given no error banner is shown\n'
-    + '  Scenario: One\n'
-    + '    Then the first list is shown\n'
-    + '  Scenario: Two\n'
-    + '    Then the second list is shown\n';
+test('coverageGate: a skipped step is still rejected', async () => {
+  // The one thing the renderer cannot catch — a missing record is a missing
+  // test.step, faithfully rendered — so coverage stays a hard gate.
+  const f = fixture(
+    FEATURE(['Given a page', 'Then the rows are shown']),
+    SPEC(`    await test.step('Given a page', async () => { await page.goto('/'); });`));
 
-  const naked = (title, body) =>
-    `    await test.step('${title}', async () => {\n      ${body}\n    });\n`;
-
-  const spec = `import { test, expect } from '@playwright/test';\n`
-    + `test.describe('F', () => {\n`
-    + `  test('One', async ({ page }) => {\n`
-    + naked('Given no error banner is shown', `await expect(page.getByRole('alert')).toHaveCount(0);`)
-    + naked('Then the first list is shown', `await expect(page.getByRole('row')).toHaveCount(3);`)
-    + `  });\n`
-    + `  test('Two', async ({ page }) => {\n`
-    + naked('Given no error banner is shown', `await expect(page.getByRole('alert')).toHaveCount(0);`)
-    + naked('Then the second list is shown', `await expect(page.getByRole('list')).toHaveCount(2);`)
-    + `  });\n});\n`;
-
-  const f = fixture(feature, spec);
-  const v = await staticGates(f.feature, f.spec);
-
-  assert.equal(v.ok, false);
-  assert.deepEqual(v.failed, ['liveness'], 'only the absence-only Background step is at fault');
-
-  const first = lineOf(spec, `await test.step('Given no error banner is shown'`);
-  const last = spec.split('\n').findLastIndex(l => l.includes(`test.step('Given no error banner is shown'`)) + 1;
-  assert.notEqual(first, last, 'the fixture has to actually repeat the title');
-  assert.equal(v.earliestLine, first,
-    `the cut must name the first copy (line ${first}), not the last (line ${last})`);
+  const cov = coverageGate(f.feature, f.spec);
+  assert.equal(cov.ok, false);
+  assert.deepEqual(cov.failed, ['step coverage']);
   f.cleanup();
+});
+
+// ── uniqueness-check failure recognition and critique sharpening ─────────────
+
+// What Playwright writes when an injected `expect(loc).toHaveCount(1)` finds
+// several matches — the numbers live on later lines, not the first.
+const COUNT_ERROR = 'Error: expect(locator).toHaveCount(expected)\n\nLocator: getByRole(\'region\')\nExpected: 1\nReceived: 6';
+const GENERIC_ERROR = 'locator.click: Element is not an <input>… strict mode was not the issue';
+
+test('describeFailures: keeps the Expected/Received lines for a count mismatch', () => {
+  const detail = describeFailures([], [{ title: "When I open the card", ok: false, error: COUNT_ERROR }]);
+  assert.match(detail, /When I open the card/, 'names the step');
+  assert.match(detail, /Received:\s*6/, 'carries the count so the mismatch is recognisable');
+});
+
+test('describeFailures: a non-count failure keeps just its first line', () => {
+  const detail = describeFailures([], [{ title: 'When I click Save', ok: false, error: GENERIC_ERROR }]);
+  assert.match(detail, /Element is not an <input>/);
+  assert.doesNotMatch(detail, /Received:/);
+});
+
+test('isCountMismatch: true only when a candidate matched more than one', () => {
+  assert.equal(isCountMismatch(describeFailures([], [{ title: 't', ok: false, error: COUNT_ERROR }])), true);
+  assert.equal(isCountMismatch(describeFailures([], [{ title: 't', ok: false, error: GENERIC_ERROR }])), false);
+  // A missing element (Received: 0) is a different failure, not a uniqueness one.
+  assert.equal(isCountMismatch('Expected: 1 Received: 0'), false);
 });

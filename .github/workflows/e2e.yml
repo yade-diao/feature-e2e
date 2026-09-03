@@ -1,4 +1,4 @@
-# Replay the recorded specs, and heal them when they go red.
+# Replay the recorded specs, and repair them when they go red.
 #
 # The happy path never records. Recording needs a model, takes minutes and is
 # not deterministic — none of which belongs on a pull request. Replay is plain
@@ -7,18 +7,20 @@
 #
 # A red replay is the only moment the model comes back. Replay runs with
 # `continue-on-error`, so a failure does not end the job: it writes the list of
-# red specs and hands off to `heal`, which re-locates each failing element and
-# re-runs only those specs. A repair is not the agent's word — the healer
-# replays deterministically and only a green replay counts as healed.
+# red specs and hands off to `record`, which — with no target — reads that list
+# and repairs only those specs in Mode B. The verify agent follows the existing
+# spec/trace, takes over at the first step that no longer holds, re-records from
+# there, and the deterministic renderer + gates confirm it. A repair is not the
+# agent's word — only a spec that passes the replay gate counts as repaired.
 #
 # So the job's final colour carries the verdict:
-#   - replay green                        -> green
-#   - replay red, heal repaired + pushed  -> green  (only a locator drifted)
-#   - replay red, heal could not repair   -> red    (the business logic broke)
+#   - replay green                          -> green
+#   - replay red, record repaired + pushed  -> green  (only a locator drifted)
+#   - replay red, record could not repair   -> red    (the business logic broke)
 #
 # The repaired spec is committed with `[skip ci]`, so pushing it does not kick
 # off the whole workflow again — only the red specs were re-run, and that
-# already happened inside `heal`.
+# already happened inside `record`.
 name: E2E
 
 on:
@@ -27,7 +29,7 @@ on:
   pull_request:
     branches: [main]
 
-# The heal step pushes the repaired spec back to the branch.
+# The repair step pushes the repaired spec back to the branch.
 permissions:
   contents: write
 
@@ -67,8 +69,8 @@ jobs:
         run: npm run check
 
       # continue-on-error: a red replay is not the verdict — it is the signal to
-      # heal. The job stays red only if healing fails, so a green job means the
-      # business logic held (or was repaired), never "the replay passed".
+      # repair. The job stays red only if the repair fails, so a green job means
+      # the business logic held (or was repaired), never "the replay passed".
       - name: Replay
         id: replay
         continue-on-error: true
@@ -91,32 +93,35 @@ jobs:
         if: steps.replay.outcome == 'failure'
         run: npm run setup:agents
 
-      # `heal` reads the red-spec list the replay just wrote and touches only
-      # those, so the green specs are not run a second time. Unhealable specs
-      # become diagnosis reports under reports/.
-      - name: Heal the red specs
-        id: heal
+      # `record` with no target reads the red-spec list the replay just wrote and
+      # repairs only those specs in Mode B — the verify agent follows each red
+      # spec/trace and takes over where it stops holding, so the green specs are
+      # not touched. Specs the page changed beyond re-location become diagnosis
+      # reports under reports/.
+      - name: Repair the red specs
+        id: repair
         if: steps.replay.outcome == 'failure'
-        run: npm run heal
+        run: npm run record
         env:
           BASE_URL: ${{ vars.BASE_URL }}
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
 
-      # `[skip ci]`: the healer already re-ran the red specs to green. Pushing
+      # `[skip ci]`: the repair already re-ran the red specs to green. Pushing
       # the fix must not re-trigger the whole workflow for a 2-hour replay of
       # specs that already passed.
-      # Stage only what healing is allowed to touch — the specs it rewrites and
-      # the diagnoses it writes. `git add -A` was wider than the truth: the
-      # setup step above generates files of its own, and a run that healed
-      # nothing still swept them into a commit saying it had healed a locator.
+      # Stage only what a repair is allowed to touch — the specs and traces it
+      # rewrites and the diagnoses it writes. `git add -A` was wider than the
+      # truth: the setup step above generates files of its own, and a run that
+      # repaired nothing still swept them into a commit saying it had repaired a
+      # locator.
       - name: Push the repaired spec
-        if: steps.heal.outcome == 'success'
+        if: steps.repair.outcome == 'success'
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -A tests/run
+          git add -A run
           if [ -d reports ]; then git add -A reports; fi
-          git diff --cached --quiet || git commit -m "test: heal locators that went red in CI [skip ci]"
+          git diff --cached --quiet || git commit -m "test: repair locators that went red in CI [skip ci]"
           git push
 
       - uses: actions/upload-artifact@v4
@@ -126,9 +131,9 @@ jobs:
           path: playwright-report/
           retention-days: 7
 
-      # A diagnosis report is the failure exit of both verify and heal. Upload
-      # it so a human can see why the business logic could not be verified and
-      # whether the fault is frontend or backend.
+      # A diagnosis report is the failure exit of a verify run (a first recording
+      # or a Mode B repair). Upload it so a human can see why the business logic
+      # could not be verified and whether the fault is frontend or backend.
       - uses: actions/upload-artifact@v4
         if: ${{ !cancelled() }}
         with:

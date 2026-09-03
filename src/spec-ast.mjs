@@ -1,18 +1,11 @@
 /**
  * Read a recorded spec by parsing it, not by matching text against it.
  *
- * Every check here used to scrape the source with regular expressions, and that
- * was not a stylistic shortcut — it was a hole. The pattern for an action
- * required `page` and `.getByText(` to sit next to each other, so a chain the
- * generator had formatted across lines matched nothing at all, and the locator
- * redundancy gate passed every multi-line action it existed to reject. The
- * generator formats long chains across lines as a matter of course, so that was
- * most of them.
- *
- * Widening the pattern would have bought one formatting variation. A comment
- * inside the chain, a template literal, a helper holding the locator — each is
- * the same bug again. A parser has no opinion about whitespace, so none of those
- * can come back.
+ * A parser has no opinion about whitespace, so it sees a locator chain the same
+ * whether it sits on one line or many — which text matching cannot, since a
+ * chain formatted across lines, a comment inside it, or a helper holding the
+ * locator each defeats a regex. The checks here depend on reading a chain
+ * correctly, so they read the parse.
  *
  * `@typescript-eslint/parser` is already a dependency: the banned-patterns gate
  * runs ESLint over these files with it.
@@ -118,169 +111,40 @@ export function specStrings(specPath) {
   return out;
 }
 
-/**
- * Every node, paired with the node that encloses it.
- *
- * `walk` answers questions about a node in isolation, which is all the checks
- * ever needed. Cutting a spec is a question about where a node *sits*: which
- * test holds it, and which calls are still open after it.
- */
-function* walkWithParent(node, parent = null) {
-  if (!node || typeof node.type !== 'string') return;
-  yield [node, parent];
-  for (const key of Object.keys(node)) {
-    if (key === 'parent' || key === 'loc' || key === 'range') continue;
-    const value = node[key];
-    if (Array.isArray(value)) {
-      for (const child of value) yield* walkWithParent(child, node);
-    } else if (value && typeof value.type === 'string') {
-      yield* walkWithParent(value, node);
-    }
-  }
-}
 
-/** The nearest call a node sits inside, or null at the top level. */
-function enclosingCall(node, parents) {
-  for (let p = parents.get(node); p; p = parents.get(p)) {
-    if (p.type === 'CallExpression') return p;
-  }
-  return null;
-}
+/** Locator builders whose ANCHOR (the source the chain starts from, nearest
+ * `page`) drifts on rebuild — its result depends on wording, markup, or raw CSS.
+ * The single source of truth for "driftable", shared with render-spec.mjs so the
+ * render-time redundancy rule and this audit are one judgement, never two lists
+ * that diverge. */
+export const DRIFTABLE_SOURCE = new Set(['getByText', 'getByAltText', 'getByTitle', 'locator']);
 
 /**
- * `test(...)` — one scenario. Not `test.step(...)`, not `test.describe(...)`.
+ * Is a locator chain driftable? Judged by its ANCHOR — the builder the chain
+ * starts from (nearest `page`), NOT by whether a driftable method appears anywhere
+ * in it. This matters for `.locator('#inner')` refinements: `getByTestId('x')
+ * .locator('#inner')` is anchored on a stable testid and is NOT driftable, even
+ * though `locator` appears in the chain; only a chain that STARTS from `getByText`/
+ * `getByAltText`/`getByTitle`/a raw `locator(css)` drifts.
  *
- * The modifiers count too. A `test.only` or `test.skip` earlier in the file is
- * still a test the seed would carry, and counting only the bare form let one
- * through: the guard below saw a single test, the slice kept both, and with
- * `only` in play Playwright runs the wrong one. Nothing here can see a test
- * imported under another name (`import { test as it }`); the generator does not
- * write that, and a seed built from one would be caught by the parse at the end
- * only if it happened not to parse.
+ * @param methods the chain methods tail-first (chainMethods output), or the
+ *                equivalent list render-spec builds; `$page`/action tails ignored.
  */
-const TEST_MODIFIERS = new Set(['only', 'skip', 'fixme', 'fail', 'slow']);
-
-const isTestCall = (node) => {
-  if (node.type !== 'CallExpression') return false;
-  const callee = node.callee;
-  if (callee.type === 'Identifier') return callee.name === 'test';
-  if (callee.type !== 'MemberExpression' || callee.computed) return false;
-  return callee.object.type === 'Identifier' && callee.object.name === 'test'
-    && callee.property.type === 'Identifier' && TEST_MODIFIERS.has(callee.property.name);
-};
-
-const isStepCall = node =>
-  node.type === 'CallExpression'
-  && node.callee.type === 'MemberExpression' && !node.callee.computed
-  && node.callee.property.type === 'Identifier' && node.callee.property.name === 'step'
-  && node.callee.object.type === 'Identifier' && node.callee.object.name === 'test';
-
-/** The indentation of the line a node opens on. */
-function indentOf(source, node) {
-  const lineStart = source.lastIndexOf('\n', node.range[0] - 1) + 1;
-  return source.slice(lineStart, node.range[0]).match(/^[ \t]*/)[0];
+export function isDriftableChain(methods) {
+  // The anchor is the last SOURCE builder before `$page` (chains are collected
+  // tail-first, so the source nearest page sits last). Combinators (or/and/filter)
+  // are not sources — a `.filter()` refining a stable anchor does not make it drift,
+  // and `.or(fallback)` is judged per-candidate elsewhere.
+  const sources = methods.filter(m => SOURCE_BUILDERS.has(m));
+  const anchor = sources[sources.length - 1];
+  return anchor != null && DRIFTABLE_SOURCE.has(anchor);
 }
-
-/**
- * How long the replayed prefix may take before the seed gives up.
- *
- * The MCP server runs a seed with `timeout: 0` — no per-test bound — which is
- * right for the blank seed it was written for, and wrong for this one: a resume
- * seed replays real clicks, and a Playwright action carries no timeout of its
- * own unless the config sets one. A prefix whose locator has since gone missing
- * would then hang until the recorder killed the whole agent, with no critique
- * to show for the attempt. The seed sets its own bound instead.
- */
-const RESUME_TIMEOUT_MS = 300_000;
-
-/**
- * The spec's source up through the last `test.step` that ends before
- * `cutoffLine`, closed so the result parses and runs on its own.
- *
- * This is what lets a retry replay the part that already worked — for real,
- * with Playwright, no model involved — and hand the agent only the part the
- * gates actually objected to, instead of re-driving the whole feature again.
- *
- * Everything about the file's shape is read off the parse. An earlier version
- * appended a fixed `});\n});` because that is how a recorded spec is nested,
- * and produced a file that did not parse the moment the shape differed: one
- * closer short when the cut landed inside a nested step, one too many when the
- * spec had no `test.describe`. Either way the seed failed to load and the
- * attempt was lost — the same class of mistake as reading a spec with a regex.
- *
- * @returns the truncated source, or null when there is nothing safe to keep —
- *          the retry then gets the ordinary blank seed.
- */
-export function truncateBeforeLine(specPath, cutoffLine) {
-  const { source, ast } = tree(specPath);
-
-  const parents = new Map();
-  for (const [node, parent] of walkWithParent(ast)) parents.set(node, parent);
-  const nodes = [...parents.keys()];
-
-  // A seed holds exactly one test. Playwright pauses at the end of *every* test
-  // function and the generator attaches at the first pause, so a seed carrying
-  // two tests hands it the page as it stood at the end of the first — not where
-  // the last attempt stopped. Emitting only the test the cut falls in would fix
-  // the landing but lose the other scenarios' source from the journal, and with
-  // it any way for the retry to write them back. A feature with more than one
-  // scenario therefore re-records from the blank seed, as it did before any of
-  // this existed.
-  const tests = nodes.filter(isTestCall);
-  if (tests.length !== 1) return null;
-  const theTest = tests[0];
-
-  const callback = theTest.arguments.find(a =>
-    a.type === 'ArrowFunctionExpression' || a.type === 'FunctionExpression');
-  if (!callback || callback.body.type !== 'BlockStatement') return null;
-  const blockOpen = callback.body.range[0];   // the `{` of the test body
-
-  let kept = null;
-  for (const node of nodes) {
-    if (!isStepCall(node)) continue;
-    // Only the steps the test holds directly. A nested step belongs to its
-    // parent; keeping it on its own would cut that parent in half.
-    if (enclosingCall(node, parents) !== theTest) continue;
-    // The step must be entirely clear of the cutoff — checking only where it
-    // *starts* would let a step that straddles the cutoff (starts before it,
-    // but its body runs past it, which is exactly where the first offending
-    // line tends to live) through as "safe", freezing the very thing the
-    // cutoff was computed to exclude into every future retry's seed.
-    if (node.loc.end.line >= cutoffLine) continue;
-    if (kept === null || node.range[1] > kept.range[1]) kept = node;
-  }
-  if (kept === null) return null;
-
-  // The call sits in `await test.step(...);` — include the semicolon so the
-  // truncated source doesn't end mid-statement.
-  let end = kept.range[1];
-  if (source[end] === ';') end += 1;
-
-  // Close exactly the calls the kept step sits inside, innermost first, each at
-  // the indentation it opened on.
-  const closers = [];
-  for (let call = enclosingCall(kept, parents); call; call = enclosingCall(call, parents)) {
-    closers.push(`${indentOf(source, call)}});`);
-  }
-
-  const out = source.slice(0, blockOpen + 1)
-    + `\n${indentOf(source, kept)}test.setTimeout(${RESUME_TIMEOUT_MS});`
-    + `   // the seed's own bound — not part of the recording`
-    + source.slice(blockOpen + 1, end)
-    + `\n${closers.join('\n')}\n`;
-
-  // Whatever this function still gets wrong about a shape it has not seen shows
-  // up here, as a retry that falls back to the blank seed, rather than as a seed
-  // Playwright cannot load and an attempt spent finding that out.
-  try { parse(out, { range: true, loc: true }); } catch { return null; }
-  return out;
-}
-
-/** Locator methods whose result depends on wording, markup or raw CSS. */
-const DRIFTABLE_SOURCE = new Set(['getByText', 'getByAltText', 'getByTitle', 'locator']);
 
 /** Anything that starts or continues a locator chain. */
 const LOCATOR_METHOD = /^(?:getBy\w+|locator|or|and|filter|first|last|nth|frameLocator|getByRole)$/;
+/** Builders that ANCHOR a locator to a source (not the or/and/filter combinators). */
+const SOURCE_BUILDERS = new Set(['getByRole', 'getByTestId', 'getByLabel', 'getByPlaceholder',
+  'getByText', 'getByAltText', 'getByTitle', 'locator', 'frameLocator']);
 
 /**
  * The methods a locator chain is built from, tail first, following a variable
@@ -352,7 +216,7 @@ export function actionLocators(specPath, actionMethods) {
       method: callee.property.name,
       chain: source.slice(callee.object.range[0], callee.object.range[1]).replace(/\s+/g, ' ').trim(),
       methods,
-      driftable: methods.some(m => DRIFTABLE_SOURCE.has(m)),
+      driftable: isDriftableChain(methods),
       hasFallback: methods.includes('or'),
     });
   }

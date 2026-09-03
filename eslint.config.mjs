@@ -15,7 +15,7 @@ import tsParser from '@typescript-eslint/parser';
 export default [
   {
     // Any spec, wherever it sits — the gate lints fixtures in a scratch
-    // directory too, and a config scoped to tests/run would silently apply no
+    // directory too, and a config scoped to run/ would silently apply no
     // rules to those and report them clean.
     files: ['**/*.spec.ts'],
     ignores: ['**/seed.spec.ts'],

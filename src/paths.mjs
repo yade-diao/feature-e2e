@@ -1,24 +1,27 @@
 /**
  * Path mapping between feature files and the specs recorded from them.
  *
- * Convention: a recorded spec mirrors its feature one-for-one, same directory shape.
+ * The feature source lives under `features/` (the functional area, version
+ * controlled); everything a run produces lives under `run/` (the run area, not
+ * version controlled apart from the seed). A recorded spec mirrors its feature
+ * one-for-one, same directory shape:
  *
- *   tests/features/people/channel-navigation.feature
- *     ->  tests/run/people/channel-navigation.spec.ts
+ *   features/people/channel-navigation.feature
+ *     ->  run/people/channel-navigation.spec.ts
  *
- * The first directory under `tests/features` is the project (one directory per
- * system under test); below that the layout is free and mirrored verbatim.
+ * The first directory under `features/` is the project (one directory per system
+ * under test); below that the layout is free and mirrored verbatim.
  *
- * Deriving one side from the other means there is no index file to maintain.
- * An index that drifts out of sync produces the worst kind of failure: verifying
- * a test that no longer exists, silently.
+ * Deriving one side from the other means there is no index file to maintain. An
+ * index that drifts out of sync produces the worst kind of failure: verifying a
+ * test that no longer exists, silently.
  */
 
 import { readdirSync, statSync, existsSync } from 'fs';
 import { basename, join, relative, sep } from 'path';
 
-export const FEATURE_DIR = join('tests', 'features');
-export const SPEC_DIR = join('tests', 'run');
+export const FEATURE_DIR = 'features';
+export const SPEC_DIR = 'run';
 
 const toNative = p => p.split(/[\\/]/).join(sep);
 
@@ -36,7 +39,7 @@ export function specToFeature(specPath) {
   return join(FEATURE_DIR, rel.replace(/\.spec\.ts$/, '.feature'));
 }
 
-/** Project name = first directory below tests/features */
+/** Project name = first directory below features/ */
 export function projectOf(featurePath) {
   const rel = relative(FEATURE_DIR, toNative(featurePath));
   const parts = rel.split(sep);
@@ -68,10 +71,11 @@ export function listFeatures(project = null) {
 export const SEED_SPEC = join(SPEC_DIR, 'seed.spec.ts');
 
 /**
- * The seed a rejected recording leaves behind for the next attempt (written and
- * removed by cli.mjs). It has to live under SPEC_DIR and end in `.spec.ts`,
- * because Playwright runs a seed only if its own testMatch collects it from
- * testDir — so this is the one place that can tell it from a recording.
+ * A resume run's seed: the already-recorded prefix, rendered as a spec and written
+ * beside the feature's own spec as a hidden file. generator_setup_page runs it for
+ * real so the browser reaches the resume step's starting state without the agent
+ * re-driving the prefix. Hidden (leading dot) so listFeatures skips it — it is a
+ * transient staging artifact, not a recorded spec, and is removed once the run ends.
  */
 export const RESUME_SEED = '.resume-seed.spec.ts';
 

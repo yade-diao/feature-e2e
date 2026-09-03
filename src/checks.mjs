@@ -2,12 +2,9 @@
  * Acceptance checks for a recorded spec.
  *
  * Cheapest first: text-only checks run before a browser is spent on a recording
- * that was never going to hold up.
- *
- * Neither asks whether the assertions are *good*; that is a separate problem.
- * What they rule out is a recording that skipped a step, or that produced a step
- * shaped like coverage but containing nothing. An empty `test.step` is worse
- * than a missing one, because it reads as done.
+ * that was never going to hold up. They do not ask whether the assertions are
+ * *good* — that is a separate problem; they rule out a recording that skipped a
+ * step, or one shaped like coverage while proving nothing.
  */
 
 import { readFileSync } from 'fs';
@@ -25,16 +22,15 @@ const ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
 const CONFIG_FILE = join(ROOT, 'eslint.config.mjs');
 import { allSteps } from './feature.mjs';
 import { testSteps, specStrings, actionLocators } from './spec-ast.mjs';
+import { normalise } from './text.mjs';
 
 /** Titles of the `test.step(...)` calls in a spec, in source order. */
 export function specStepTitles(specPath) {
   return testSteps(specPath).map(s => s.title);
 }
 
-const normalise = t => String(t).replace(/\s+/g, ' ').replace(/["'“”‘’]/g, '"').trim();
-
 /**
- * Gate 1 — every feature step must appear as a `test.step` title.
+ * Every feature step must appear as a `test.step` title.
  *
  * Matching is exact after whitespace/quote normalisation. Deliberately strict:
  * a fuzzy match would let a step drift away from what the feature asked while
@@ -55,29 +51,15 @@ export function checkStepCoverage(featurePath, specPath) {
 }
 
 /**
- * Gate 2 — no `test.step` may be empty.
+ * Shapes a recording may not use (delegated to eslint-plugin-playwright).
  *
- * Input is the step records collected by src/reporter.mjs during replay:
- * a step that performed nothing has no child steps at all, which is exactly
- * how a silently skipped step looks from the outside.
- */
-export function checkStepSubstance(recordedSteps) {
-  const empty = recordedSteps.filter(s => s.children.length === 0);
-  return { ok: empty.length === 0, empty, total: recordedSteps.length };
-}
-
-
-/**
- * Gate 1b — shapes a recording may not use.
+ * eslint-plugin-playwright carries almost all of these rules, maintained by the
+ * Playwright community and working on the AST rather than on lines of text. It
+ * also catches an un-awaited assertion (which never fails) and a test with no
+ * assertions at all (which passes by definition).
  *
- * This was a hand-written table of regexes until eslint-plugin-playwright turned
- * out to already have almost all of it, maintained by the Playwright community
- * and working on the AST rather than on lines of text. It also carries rules the
- * table never had — an un-awaited assertion never fails, and a test with no
- * assertions at all passes by definition.
- *
- * The rules themselves live in eslint.config.mjs so that a person editing a spec
- * in their editor and the gate rejecting one see exactly the same list.
+ * The rules live in eslint.config.mjs so that a person editing a spec in their
+ * editor and the gate rejecting one see exactly the same list.
  */
 export async function checkBannedPatterns(specPath) {
   let results;
@@ -88,7 +70,7 @@ export async function checkBannedPatterns(specPath) {
     // handed over is only used to decide which config block applies.
     results = await new ESLint({ overrideConfigFile: CONFIG_FILE }).lintText(
       readFileSync(specPath, 'utf8'),
-      { filePath: join(ROOT, 'tests', 'run', basename(specPath)) });
+      { filePath: join(ROOT, 'run', basename(specPath)) });
   } catch (e) {
     // A linter that could not run has cleared nothing. Reporting "ok" here would
     // be the same mistake as a check that never executes.
@@ -134,7 +116,7 @@ const ABSENCE = [
 ];
 
 /** Matchers that claim something is there. */
-const PRESENCE = [
+export const PRESENCE = [
   /\.toBeVisible\s*\(/,
   /\.toBeAttached\s*\(/,
   /\.toHaveText\s*\(/,
@@ -152,7 +134,7 @@ const PRESENCE = [
 const matchesAny = (res, text) => res.some(re => re.test(text));
 
 /**
- * Gate 1c — a step that only asserts absence needs evidence the page is alive.
+ * A step that only asserts absence needs evidence the page is alive.
  *
  * "at most 10 rows" is satisfied by zero rows. "no row lacks the keyword" is
  * satisfied by no rows at all. A step built only from upper bounds and absences
@@ -182,7 +164,7 @@ export function checkLiveness(featurePath, specPath) {
 }
 
 /**
- * Gate 6 (audit) — strings the spec names that the feature never authorised.
+ * Audit — strings the spec names that the feature never authorised.
  *
  * A feature step quotes the labels it cares about verbatim — `opens the "教育"
  * channel` — and those quoted strings are the anchors a recorder is allowed to
@@ -218,7 +200,7 @@ export function checkSemanticStability(featurePath, specPath) {
 }
 
 /**
- * Gate 7 (audit) — locators that will break on the next build.
+ * Audit — locators that will break on the next build.
  *
  * A recorded locator pins whatever it was made from. Some sources are stable —
  * role, label, a hand-written testid; others change on every rebuild or the next
@@ -248,7 +230,7 @@ export function checkLocatorRobustness(specPath) {
 }
 
 /**
- * Gate 4 — an action locator with no fallback.
+ * An action locator with no fallback.
  *
  * A locator that drives an action (click, fill, select…) fails the whole test
  * when it stops matching: the step throws and every assertion after it never
@@ -280,5 +262,48 @@ export function checkLocatorRedundancy(specPath) {
   const naked = actionLocators(specPath, ACTION_METHODS)
     .filter(a => a.driftable && !a.hasFallback)
     .map(({ line, method, chain }) => ({ line, method, chain }));
+  return { ok: naked.length === 0, naked };
+}
+
+/**
+ * Audit — a step that changes state must prove it, in the same step.
+ *
+ * A write (create / update / delete) can appear to succeed — the click landed,
+ * nothing threw — while the operation silently failed. Without a direct
+ * assertion the step reads as done, and the failure only surfaces later when a
+ * downstream step uses data that was never really there: a misattributed
+ * cascade (see knowledge/local/engine/cascading-failure.md).
+ *
+ * A step is a "naked write" when its body performs a mutating action but asserts
+ * nothing present. Detection mirrors checkLiveness: classify by matcher on the
+ * step body, not by wording, so it holds in any language. Mutation is judged by
+ * the method invoked (fill/selectOption/check/type…), the subset of actions that
+ * change state — a bare navigation `click` is not one, which keeps read-only
+ * navigation steps from tripping it.
+ *
+ * This ships as an audit, not a hard gate: `press('Enter')` is shared by a
+ * search (a read) and a form submit (a write), and a search that asserts its
+ * result in the same step is fine — but the signal is strong enough to list, and
+ * a human decides. List, do not reject.
+ */
+
+/** Actions that mutate state — the write subset of ACTION_METHODS. */
+const WRITE_ACTIONS = [
+  /\.fill\s*\(/,
+  /\.selectOption\s*\(/,
+  /\.check\s*\(/,
+  /\.uncheck\s*\(/,
+  /\.setInputFiles\s*\(/,
+  /\.clear\s*\(/,
+  /\.type\s*\(/,
+];
+
+export function checkWriteCheckpoint(specPath) {
+  const naked = [];
+  for (const { title, body, line } of testSteps(specPath)) {
+    if (!matchesAny(WRITE_ACTIONS, body)) continue;   // no mutation here
+    if (matchesAny(PRESENCE, body)) continue;         // already proven
+    naked.push({ line, title });
+  }
   return { ok: naked.length === 0, naked };
 }
