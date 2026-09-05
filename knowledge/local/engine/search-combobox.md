@@ -13,9 +13,15 @@ await box.press('Enter')          // commit — triggers the filter / selection
 await expect(results).toBeVisible()  // wait for the filtered result, not a fixed sleep
 ```
 
-Prefer waiting on the expected result over a fixed delay. If the control is a
-combobox that reveals options rather than filtering in place, commit by clicking
-the option once it appears instead of pressing Enter.
+Prefer waiting on the expected result over a fixed delay. **When a combobox reveals a
+dropdown of options, prefer committing by keyboard — fill the full option text, then
+`press('Enter')` — over clicking the option row.** The dropdown option is async popover
+content: it is not on the page at the instant a clean replay reaches it, so a recorded
+"click the option" waits out the timeout and fails on replay, while a keyboard commit is
+deterministic. Only click the option if keyboard commit genuinely does not select it, and
+then guard that click with an assertion that the option is visible first (make the wait a
+recorded state, per `wizard-async-elements.md`). Either way, read back the committed value
+to prove it bound.
 
 Keep the fill, the commit, and the assertion on the result in the **same** step.
 A search whose result is only checked in a later step reads as if the search
@@ -30,7 +36,7 @@ hand (a scripted click there doesn't record). Type the option's text into the
 inner input and commit with a key instead — the control does its own matching:
 
 ```
-const box = page.getByTestId('spendType').locator('#inner')
+const box = page.getByTestId('someCombobox').locator('#inner')  // the app's own testid
 await box.fill(optionText)
 await box.press('Enter')              // the control selects the match
 await expect(box).toHaveValue(optionText)  // prove the selection

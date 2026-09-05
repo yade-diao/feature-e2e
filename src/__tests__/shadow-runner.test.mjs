@@ -14,10 +14,17 @@ import { ShadowRunner } from '../shadow-runner.mjs';
 
 // A fake page whose locators record what was driven. buildLocator (record-interpret)
 // calls page.getByRole(...).click() etc.; we make those chainable and log calls.
-function fakePage({ url = 'about:blank' } = {}) {
+// `count` sets what locator.count() returns AND drives waitFor({state:'attached'}):
+// count>0 → the element is "attached" (waitFor resolves); count===0 → it never
+// attaches (waitFor rejects), the same state-driven presence check _step now uses.
+// waitForLoadState is a no-op unless overridden.
+function fakePage({ url = 'about:blank', count = 1, waitForLoadState } = {}) {
   const calls = [];
   const loc = () => new Proxy({}, { get: (_t, m) => {
     if (m === 'then') return undefined;
+    if (m === 'count') return async () => count;
+    if (m === 'first') return () => loc();                       // chainable, same count
+    if (m === 'waitFor') return async () => { if (!(count > 0)) throw new Error('not attached'); };
     return async (...a) => { calls.push({ m: String(m), a }); return undefined; };
   }});
   const page = {
@@ -26,6 +33,7 @@ function fakePage({ url = 'about:blank' } = {}) {
     getByRole: () => loc(), getByTestId: () => loc(), getByText: () => loc(),
     getByLabel: () => loc(), getByPlaceholder: () => loc(), locator: () => loc(),
     goto: async (p) => { calls.push({ m: 'goto', a: [p] }); },
+    waitForLoadState: waitForLoadState ?? (async () => {}),
     evaluate: async () => 0,
   };
   return page;
@@ -192,3 +200,40 @@ test('_captureState includes a main-region marker to tell same-URL views apart',
   assert.equal(st.heading, 'Account Plan');
 });
 
+
+// ── state-driven replay: decide by page/element STATE, never by a clock ──────
+
+test('_step fails immediately when the target is absent on the loaded page (no clock wait)', async () => {
+  const r = new ShadowRunner();
+  const settled = [];
+  r._page = fakePage({ count: 0, waitForLoadState: async (s) => { settled.push(s); } });
+  const rec = { step: 'When I click Save', scenario: 'S',
+    actions: [{ method: 'click', locators: [{ kind: 'role', role: 'button', name: 'Save' }] }] };
+  const res = await r._step(rec);
+  assert.equal(res.ok, false, 'absent target → fail');
+  assert.equal(res.reason, 'element-absent', 'the fail carries a STATE reason, not a timeout');
+  assert.equal(res.phase, 'action');
+  assert.deepEqual(settled, ['networkidle'], 'it settled to the loaded state before checking, and did not wait on a clock');
+  assert.ok(!r._page.calls.some(c => c.m === 'click'), 'the action was NOT fired at an absent element');
+  assert.equal(r._dirty, true);
+});
+
+test('_step runs the action when the target is present on the loaded page', async () => {
+  const r = new ShadowRunner();
+  r._page = fakePage({ count: 1 });
+  const rec = { step: 'When I click Save', scenario: 'S',
+    actions: [{ method: 'click', locators: [{ kind: 'role', role: 'button', name: 'Save' }] }] };
+  const res = await r._step(rec);
+  assert.equal(res.ok, true, 'present target → the step runs and passes');
+  assert.ok(r._page.calls.some(c => c.m === 'click'), 'the action was driven');
+});
+
+test('_step exempts goto from the presence check (it navigates by itself)', async () => {
+  const r = new ShadowRunner();
+  r._page = fakePage({ count: 0 });   // count 0 would fail a located action, but goto is exempt
+  const rec = { step: 'When I open the dashboard', scenario: 'S',
+    actions: [{ method: 'goto', arg: { literal: '/dashboard' } }] };
+  const res = await r._step(rec);
+  assert.equal(res.ok, true, 'goto is not gated on element presence');
+  assert.ok(r._page.calls.some(c => c.m === 'goto'), 'the navigation ran');
+});

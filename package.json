@@ -10,6 +10,7 @@
     "check": "node src/cli.mjs check",
     "record": "node src/cli.mjs record",
     "replay": "node src/cli.mjs replay",
+    "timing": "node src/cli.mjs timing",
     "sync": "node src/cli.mjs sync",
     "test": "node --test src",
     "setup:agents": "playwright init-agents --loop=claude",

@@ -46,6 +46,7 @@ import { checkSemanticStability, checkLocatorRobustness, checkWriteCheckpoint } 
 import { logAttempt, summary } from './journal.mjs';
 import { syncExternal } from './knowledge.mjs';
 import { projectOf } from './paths.mjs';
+import { reportPaths } from './diagnose.mjs';
 import { allSteps, baseUrlFromFeature } from './feature.mjs';
 
 const [command = 'status', target = null, third = null] = process.argv.slice(2).filter(a => !a.startsWith('--'));
@@ -136,6 +137,27 @@ function cmdStatus() {
  * is touched.
  */
 const MAX_ATTEMPTS = 3;
+
+/**
+ * State-driven timeouts for a RESUME SEED render.
+ *
+ * A resume seed exists only to replay a known-good prefix and bring the browser
+ * back to the stuck step's starting state; the agent then takes over. When that
+ * prefix has gone stale (a step recorded under duress that no longer holds), a
+ * bare web-first assertion OR action would wait out the record config's 15s/120s
+ * before failing — a 91-step recording has hung two minutes here, and an ACTION on
+ * a vanished element is the worst (an unset actionTimeout lets it run to the whole
+ * test's 120s). So the seed render caps every assertion and located action at
+ * SEED_STEP_MS (aligned with the shadow runner's STATE_PROBE_MS): "the page has
+ * loaded and the target still is not here → fail now". `page.goto` gets the longer
+ * SEED_NAV_MS instead — navigation is an arrival that must complete, and a remote
+ * cold first paint needs far more than 2s. The seed replay fails fast on the first
+ * stale step, reports it, and the agent takes over. The PROMOTED spec is rendered
+ * WITHOUT these (renderSpec with no seed/nav timeout → the bare form, byte-for-byte),
+ * so CI's real 120s regression budget in playwright.config.ts is untouched.
+ */
+const SEED_STEP_MS = 2_000;
+const SEED_NAV_MS = 120_000;
 
 /**
  * Pull the links.json-declared knowledge bases for the targeted features'
@@ -258,7 +280,7 @@ async function cmdRecord() {
       let recs = [];
       try { recs = readTrace(feature); } catch { return null; }
       if (recs.length === 0 || recs.length >= totalSteps) return null;
-      try { writeFileSync(resumeSeedPath, renderSpec(recs)); }
+      try { writeFileSync(resumeSeedPath, renderSpec(recs, { seedTimeoutMs: SEED_STEP_MS, navTimeoutMs: SEED_NAV_MS })); }
       catch { return null; }   // an unrenderable prefix cannot seed a replay
       resumeSeed = resumeSeedPath;
       existingTracePath = tracePath;
@@ -319,7 +341,7 @@ async function cmdRecord() {
       // existing.length+1's starting state, and the agent records onward without
       // re-driving the prefix (prefixUsable already proved this renders, line ~241).
       resumeFromStep = existing.length + 1;
-      writeFileSync(resumeSeedPath, renderSpec(existing));
+      writeFileSync(resumeSeedPath, renderSpec(existing, { seedTimeoutMs: SEED_STEP_MS, navTimeoutMs: SEED_NAV_MS }));
       resumeSeed = resumeSeedPath;
       existingTracePath = tracePath;
       if (existsSync(specPath)) existingSpecPath = specPath;
@@ -666,6 +688,98 @@ function cmdReplay() {
   return 0;
 }
 
+/** The per-step timing log path for a feature (mirrors mcp-proxy's timingLogPath). */
+function timingPathFor(featurePath) {
+  const base = featurePath.split('/').pop().replace(/\.feature$/, '');
+  return join(reportPaths(featurePath).dir, `${base}.timing.jsonl`);
+}
+
+/** Read the per-step timing records a recording wrote for a feature (or []). */
+function readTiming(featurePath) {
+  const p = timingPathFor(featurePath);
+  if (!existsSync(p)) return [];
+  return readFileSync(p, 'utf8').split('\n').filter(l => l.trim()).flatMap(l => {
+    try { return [JSON.parse(l)]; } catch { return []; }
+  });
+}
+
+/** Sum a numeric field over records, treating null/undefined as 0. */
+function sumBy(rows, field) {
+  return rows.reduce((a, r) => a + (Number.isFinite(r[field]) ? r[field] : 0), 0);
+}
+
+/** Percentiles (min/median/max) of a numeric field, ignoring null. */
+function stats(rows, field) {
+  const xs = rows.map(r => r[field]).filter(Number.isFinite).sort((a, b) => a - b);
+  if (!xs.length) return null;
+  const median = xs[Math.floor((xs.length - 1) / 2)];
+  return { min: xs[0], median, max: xs[xs.length - 1], n: xs.length };
+}
+
+const fmtMs = ms => (Number.isFinite(ms) ? `${(ms / 1000).toFixed(1)}s` : '—');
+const pct = (part, total) => (total > 0 ? `${((part / total) * 100).toFixed(1)}%` : '—');
+
+/**
+ * `timing` — read the per-step timing.jsonl a recording wrote and print where the
+ * wall-clock went: judge vs replay vs scout share of total, single-judge min/median/
+ * max, the slowest steps, and the duel/scout hot spots. This is the profile the
+ * optimisation decisions are made from — pure read + compute, no side effects.
+ */
+function cmdTiming() {
+  const features = resolveTargets(target);
+  let any = false;
+  for (const feature of features) {
+    const rows = readTiming(feature);
+    if (!rows.length) continue;
+    any = true;
+
+    const totalMs = sumBy(rows, 'totalMs');
+    const judgeMs = sumBy(rows, 'judgeMs');
+    const replayMs = sumBy(rows, 'replayMs');
+    const scoutMs = sumBy(rows, 'scoutMs');
+    const otherMs = Math.max(0, totalMs - judgeMs - replayMs - scoutMs);
+
+    console.log(`\n=== ${feature} ===`);
+    console.log(`steps recorded: ${rows.length}   total wall-clock in record_step: ${fmtMs(totalMs)}`);
+    console.log(`  judge   ${fmtMs(judgeMs)}  (${pct(judgeMs, totalMs)})`);
+    console.log(`  replay  ${fmtMs(replayMs)}  (${pct(replayMs, totalMs)})`);
+    console.log(`  scout   ${fmtMs(scoutMs)}  (${pct(scoutMs, totalMs)})`);
+    console.log(`  other   ${fmtMs(otherMs)}  (${pct(otherMs, totalMs)})  [agent think/tool wait outside the measured phases]`);
+
+    const js = stats(rows, 'judgeMs');
+    if (js) console.log(`\nsingle judge call: min ${fmtMs(js.min)}  median ${fmtMs(js.median)}  max ${fmtMs(js.max)}  (over ${js.n} judged steps)`);
+
+    const slowest = [...rows].filter(r => Number.isFinite(r.totalMs)).sort((a, b) => b.totalMs - a.totalMs).slice(0, 10);
+    if (slowest.length) {
+      console.log(`\nslowest ${slowest.length} steps:`);
+      for (const r of slowest) {
+        console.log(`  #${r.step ?? '?'} ${fmtMs(r.totalMs)}  [${r.outcome ?? '?'}${r.rounds > 1 ? `, ${r.rounds} rounds` : ''}]  ${String(r.title ?? '').slice(0, 60)}`);
+      }
+    }
+
+    const hot = rows.filter(r => (r.rounds ?? 0) > 1 || r.outcome === 'reject' || Number.isFinite(r.scoutMs));
+    if (hot.length) {
+      console.log(`\nduel / scout hot spots (${hot.length}):`);
+      for (const r of hot) {
+        console.log(`  #${r.step ?? '?'} ${r.outcome ?? '?'}${r.rounds > 1 ? ` (${r.rounds} rounds)` : ''}${Number.isFinite(r.scoutMs) ? ` scout ${fmtMs(r.scoutMs)}` : ''}  ${String(r.title ?? '').slice(0, 50)}`);
+      }
+    }
+
+    const refused = rows.filter(r => typeof r.outcome === 'string' && r.outcome.startsWith('refused'));
+    if (refused.length) {
+      console.log(`\nlocator refusals (${refused.length}) — a refused terminal step can force a delete-and-redo:`);
+      for (const r of refused) {
+        console.log(`  ${r.outcome}  ${fmtMs(r.totalMs)}  ${String(r.title ?? '').slice(0, 60)}`);
+      }
+    }
+  }
+  if (!any) {
+    console.log(target ? `no timing data for "${target}" (has it been recorded since timing was added?)` : 'no timing data found (record a feature first)');
+    return 1;
+  }
+  return 0;
+}
+
 /** The specs a previous replay marked red, if any — read once by `record`. */
 function readRedSpecs() {
   if (!existsSync(RED_SPECS_FILE)) return null;
@@ -706,6 +820,16 @@ function cmdRetrace() {
   }
   const tracePath = featureToTrace(target);
   const before = readTrace(target).length;
+  // Retracing to K=1 discards the ENTIRE recorded trace. That is legitimate when an
+  // existing artifact is useless from the very first step (a fresh start), but it is
+  // also exactly what a confused resume run does when it wrongly decides step 1 is
+  // broken — the failure that wiped a good 3-step prefix. truncateTrace still backs up
+  // to .bak so nothing is lost, but make the total wipe loud rather than silent, so a
+  // misfire on a non-empty trace is visible in the log instead of looking routine.
+  if (k === 1 && before > 0) {
+    console.log(`  note: retrace 1 discards all ${before} recorded step(s) — a full restart, not a partial takeover`);
+    console.log('  (a resume run should re-confirm its landing point read-only rather than retrace to 1; see the agent prompt)');
+  }
   // Keep the K-1 records before the takeover step. truncateTrace backs up to
   // .bak first, so an overshoot never loses the records it drops.
   const kept = truncateTrace(target, k - 1);
@@ -746,10 +870,11 @@ const commands = {
   retrace: cmdRetrace,
   replay: cmdReplay,
   sync: cmdSync,
+  timing: cmdTiming,
 };
 
 if (!commands[command]) {
-  console.log('usage: node src/cli.mjs <status|check|record|retrace|replay|sync> [feature or project] [--knowledge=repo|path,...] [--refresh] [--restart]');
+  console.log('usage: node src/cli.mjs <status|check|record|retrace|replay|sync|timing> [feature or project] [--knowledge=repo|path,...] [--refresh] [--restart]');
   process.exit(2);
 }
 process.exit((await commands[command]()) ?? 0);

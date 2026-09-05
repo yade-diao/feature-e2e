@@ -132,20 +132,34 @@ calling generator_setup_page runs it for real, so the browser lands at step
 ${resumeFromStep}'s starting state — you do NOT re-drive or re-record any earlier step.
 \`generator_read_log\` shows you the seed's source under "# Seed file".
 
+**The prefix steps are DONE — the "drive-then-record" rule does NOT apply to them.**
+They were driven by the seed replay, not by you, and they are already on disk. You do
+NOT need to have driven a locator yourself for a prefix step to count — it counts
+because it is recorded. So: do NOT \`browser_navigate\` back to a prefix page, do NOT
+try to re-drive the login or any earlier action "so you can record its locator", and
+do NOT \`record_step\` any step ≤ ${resumeFromStep - 1}. A login done by the seed
+leaves you logged in; navigating back to the login page only redirects you forward and
+traps you. Confirm your landing point with **read-only tools only** (browser_snapshot /
+browser_find / the verify_* tools) — never by driving the page.
+
 When the seed replays cleanly and lands you at step ${resumeFromStep}'s starting state,
 pick up there and \`record_step\` onward through the end of the feature. Do NOT record
 steps 1..${resumeFromStep - 1} again — they are on disk; a second record would duplicate
 the trace.
 
-**But the prefix is a lead, not a guarantee.** It was recorded earlier; the page or
-its data may have changed. If generator_setup_page ERRORS, or you are NOT at step
-${resumeFromStep}'s expected starting state afterward (confirm with the read-only tools —
-the heading/URL/element the next step needs is not there), then a prefix step no
-longer holds on the live page. Do NOT force a record_step onto a wrong page. Switch
-to taking over (see "## Mode B" in your agent definition): follow the trace as a
-reference, find the FIRST step that no longer holds, run
-\`node src/cli.mjs retrace ${featurePath} K\` to keep the K-1 that still hold, and
-re-record from step K. A broken prefix is a takeover, not a dead end.` : `
+**If the landing point looks wrong, re-confirm before concluding the prefix is bad.**
+This prefix was already confirmed renderable by the orchestrator, so a wrong-looking
+landing is far more likely a not-yet-settled page or a stale read than a truly broken
+prefix step. If generator_setup_page ERRORS or the read-only check does not yet show
+step ${resumeFromStep}'s expected state: wait for the page to settle and re-check, or
+call generator_setup_page once more to re-establish the landing — do NOT
+\`browser_navigate\` around hunting for it. Only if, after re-confirming, a specific
+prefix step genuinely no longer holds on the live page do you take over: follow the
+trace as a reference, find the FIRST step that no longer holds, run
+\`node src/cli.mjs retrace ${featurePath} K\` (K must be ≥ 2 here — a confirmed prefix
+is never wrong from step 1; if step 1 seems wrong it is a landing/session issue, not a
+broken login, so re-confirm instead of retracing to 1) to keep the K-1 that still hold,
+and re-record from step K. A broken prefix is a takeover, not a dead end.` : `
 
 ### No confirmed prefix — follow the existing artifact step by step
 

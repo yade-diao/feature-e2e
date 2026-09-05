@@ -48,6 +48,26 @@ export function loadCoreKnowledge() {
   return readMarkdown(CORE_DIR).filter(d => d.topic !== 'INDEX');
 }
 
+/**
+ * The LOCAL knowledge injected in full (inline) at the start of a recording — the
+ * curated, always-relevant core, so the agent has it up front rather than having to
+ * decide to read it: (1) all of engine/ (product-neutral technique), plus (2) the
+ * current feature's own domain `basics` and the shared `_common/` (credentials,
+ * placeholders). Index files are excluded (their pointers are for on-demand reading,
+ * which still applies to OTHER domains and to external bases). Other domains' basics
+ * and the large external bases stay on-demand — not inlined here.
+ */
+export function loadInlineLocalKnowledge(project) {
+  const docs = [...loadCoreKnowledge()];                    // engine/*, no INDEX
+  const common = join(LOCAL_DIR, '_common');
+  for (const d of readMarkdown(common)) if (d.topic !== 'INDEX') docs.push(d);
+  if (project) {
+    const domain = join(LOCAL_DIR, project);
+    for (const d of readMarkdown(domain)) if (d.topic !== 'INDEX') docs.push(d);
+  }
+  return docs;
+}
+
 /** Parse links.json; an absent or unreadable file is not an error — no links. */
 export function readLinks() {
   if (!existsSync(LINKS_FILE)) return {};
@@ -193,21 +213,32 @@ export function selectKnowledge(featurePath, { linksOverride, destOverride, extr
   const index = existsSync(CORE_INDEX) ? CORE_INDEX : null;
   const sources = resolveSources(project, extra, { linksOverride, destOverride });
   const external = sources.find(s => s.kind !== 'local')?.dir ?? null;
+  const inline = loadInlineLocalKnowledge(project);
 
-  if (!index && !sources.length) return { text: '', index: null, sources: [], external: null };
+  if (!index && !sources.length && !inline.length) return { text: '', index: null, sources: [], external: null };
 
   const lines = ['--- KNOWLEDGE (reference; your agent definition still governs) ---'];
-  if (index) {
+
+  // Layer 1: the curated local core, INLINE in full — engine technique + this
+  // feature's domain basics + shared _common. The agent has it up front (no need to
+  // decide to read it), so it applies the replayability/idempotency/interaction
+  // rules from the first step instead of after being rejected.
+  if (inline.length) {
     lines.push(
-      `Reference technique is indexed in ${index} — locator strategy, shadow-DOM`,
-      `inputs, slow third-party content, search/combobox, cascades, write`,
-      `checkpoints. Read that index first; when a topic applies to what you are`,
-      `doing, read that one file for the detail. Do not read them all up front.`);
+      `Core knowledge (below, in full — engine technique, this feature's domain`,
+      `basics, and shared credentials/placeholders). Apply it directly; do not go`,
+      `re-read these files.${index ? ` The engine index (${index}) lists the same topics for reference.` : ''}`);
+    for (const d of inline) {
+      lines.push('', `### ${d.topic}`, d.text);
+    }
   }
+
+  // Layer 2: everything else — OTHER domains' basics and the large external bases —
+  // stays on-demand (not inlined), read by its own index/README when a topic applies.
   if (sources.length) {
-    lines.push(
-      `Additional knowledge bases (read each one's index/README/conventions the`,
-      `same way, on demand — do not read them all up front):`);
+    lines.push('',
+      `Additional knowledge bases — read each one's index/README/conventions on demand`,
+      `(do not read them all up front):`);
     for (const s of sources) lines.push(`  - ${s.dir}/`);
   }
   lines.push('--- END KNOWLEDGE ---');

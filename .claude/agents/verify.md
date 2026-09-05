@@ -57,7 +57,12 @@ violation and name it, so getting it right the first time only saves a round-tri
    page is verified there, and the later submit navigating away cannot un-verify it
    — whereas re-counting at record time would find nothing. **Never drop or alter an
    action's locator to slip a step past a check** — re-drive it with the locator you
-   mean to record.
+   mean to record. **Exception — a resume run's prefix steps:** when you resume at
+   step K with steps 1..K-1 already recorded (a seed replayed them to bring the
+   browser to K's starting state), those prefix steps do NOT need to be driven by you
+   and must NOT be re-recorded — they already count because they are on disk. Do not
+   navigate back to re-drive a login or any prefix action; confirm your landing point
+   read-only and record from step K.
 4. **`record_step` is the only way to record.** No CLI or Bash path appends a step;
    your `Bash` is for `node src/cli.mjs retrace` alone (§9). Never hand-write the
    trace or spec.
@@ -196,6 +201,27 @@ options live in a separate popover, a radio that only toggles under a real click
 is already written down. **Do not re-derive it; read the knowledge base your task
 points you at**, on demand (its index first, then the one topic that applies).
 
+**Read the relevant topic BEFORE you record a step of that kind, not after it is
+refused.** Recurring refusals come from acting first and consulting the knowledge only
+once rejected — e.g. recording `toHaveCount` with a string `"0"` and getting a
+`malformed arg` refusal, when `engine/assertion-matchers.md` already states the value
+must be a bare integer; or treating a "there is no X" precondition as a hollow
+"page loaded" assertion, when the domain basics say a run-unique dynamic name makes
+absence hold for free and you assert it with `{ref}` + `toHaveCount(0)`/`toBeHidden`.
+When a step is an assertion, a create/precondition, a UI5 input, or a card action,
+read that topic first and record it right the first time — a round spent re-recording
+after a refusal is far more expensive than the read.
+
+**Go looking — the injected knowledge block is a starting point, not the whole
+library.** You have `Read` and `Bash` (for `grep`): when you hit anything you are not
+certain how to record — an unfamiliar matcher, a control you cannot locate, a step
+type you have not seen — actively search `knowledge/local/` (and the linked
+`knowledge/external/rgm-e2e-knowledge/`) for it before guessing. `grep -ri "toHaveCount"
+knowledge/` or reading the domain's basics file will usually already hold the answer.
+Guessing and getting refused, then reading, is the slow path; reading first is the fast
+one. Treat the knowledge base as something you consult on your own initiative, not only
+what was handed to you.
+
 - The knowledge block names an **engine index** (`local/engine/`: locator strategy,
   shadow-DOM inputs, search/combobox) and **`rgm-e2e-knowledge`**, whose
   `conventions/ui5-interaction.md` catalogues UI5 interaction gotchas.
@@ -303,6 +329,26 @@ An action or assertion refers to a value by `{ ref: 'PROMOTION_NAME' }` or carri
 `{ literal: '...' }`. The judgement is yours: a value identifying something this run
 creates, or carrying a time/sequence, is dynamic; anything the feature states as
 input is fixed.
+
+**A name the feature gives for something a step CREATES is a template, not a fixed
+literal.** A feature table often spells a fixed-looking creation name (a promotion
+name, a plan name, any label for a record the step brings into existence). That
+written name is the *template* for what to create, NOT a literal to type verbatim.
+Recording it as `{ kind: 'fixed', literal: '<that name>' }` makes the spec
+**non-idempotent**: the first run creates it, and the second run's precondition
+("there is no X named …") is now false, or the create collides — the recording
+cannot replay against the same environment twice. So when a step **creates** a named
+entity, record the name as a dynamic value with a run-unique suffix
+(`{ kind: 'dynamic', expr: "`<template>_${Date.now()}`" }`, base = the feature's
+template name), and every later step that searches / edits / deletes / asserts on
+that same entity refers to it by the SAME `{ ref: … }` — never by the frozen literal.
+"Fixed" is for inputs you SELECT that already exist (a customer, a product id); a name
+you BRING INTO EXISTENCE this run is dynamic. This is the one rule that decides whether
+the feature can be re-recorded and re-run at all. Keep the generated value valid for
+the field — a unique suffix must still fit the target's length/format limit (a name
+input often caps at some length; a too-long dynamic value is rejected and the create
+fails). Shorten the base or truncate the suffix to fit; the project knowledge base
+names any specific limit.
 
 **A dynamic value must be a `ref` everywhere it appears — including inside a locator.**
 The trap that fails every later run: writing the dynamic value's current literal

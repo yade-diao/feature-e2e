@@ -9,7 +9,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { ReadBuffer, serialize, ProxyCore, shadowActivityLine, judgeActivityLine } from '../mcp-proxy.mjs';
+import { ReadBuffer, serialize, ProxyCore, shadowActivityLine, judgeActivityLine, msSuffix } from '../mcp-proxy.mjs';
 
 // ── ReadBuffer: line-delimited JSON framing ──────────────────────────────────
 
@@ -36,6 +36,7 @@ function harness({ appendRecord, countRecords, evalTimeoutMs, replayStep, trunca
   const truncations = [];
   const verdicts = [];
   const activity = [];   // activity-log lines the proxy would append (shadow/judge)
+  const timing = [];     // per-step timing records the proxy would append
   const core = new ProxyCore({
     sendToAgent: m => toAgent.push(m),
     sendToUpstream: m => toUpstream.push(m),
@@ -56,8 +57,10 @@ function harness({ appendRecord, countRecords, evalTimeoutMs, replayStep, trunca
     appendVerdict: appendVerdict ?? ((feature, entry) => { verdicts.push({ feature, entry }); }),
     // Capture activity lines in-memory instead of writing the activity.log file.
     appendActivity: (feature, line) => { activity.push({ feature, line }); },
+    // Capture per-step timing records in-memory instead of writing timing.jsonl.
+    appendTiming: (feature, entry) => { timing.push({ feature, entry }); },
   });
-  return { core, toAgent, toUpstream, appends, truncations, verdicts, activity };
+  return { core, toAgent, toUpstream, appends, truncations, verdicts, activity, timing };
 }
 
 // Reply to every browser_evaluate the proxy has sent upstream, until the agent
@@ -244,6 +247,27 @@ test('record_step: a step naming a locator never driven → refused, not appende
   const reply = h.toAgent.find(m => m.id === 42);
   assert.equal(reply.result.isError, true);
   assert.match(reply.result.content[0].text, /not the one you drove|Drive each action/);
+});
+
+test('record_step: an unverified-locator refusal is logged to activity and timing (the delete-and-redo trigger)', async () => {
+  const h = harness();
+  h.core.onAgentMessage(recordStepMsg({
+    scenario: 'S', step: 'When I click Save',
+    actions: [{ method: 'click', locators: [{ kind: 'role', role: 'button', name: 'Save' }] }],
+    assertions: [],
+  }));
+  await new Promise(r => setImmediate(r));
+  const refusedLine = h.activity.find(a => a.line.includes('REFUSED unverified-locator'));
+  assert.ok(refusedLine, 'the refusal is written to the shared activity log, not only the swallowed stderr');
+  const t = h.timing.find(x => x.entry.outcome === 'refused-unverified-locator');
+  assert.ok(t, 'timing records the refusal outcome so cli.mjs timing can count it');
+});
+
+test('action: a non-unique drive refusal is logged to the activity log', async () => {
+  const h = harness();
+  await driveAction(h, clickAction(3, "getByRole('button', { name: 'Edit' })"), { count: 3 });
+  const refusedLine = h.activity.find(a => a.line.includes('[action] REFUSED not-unique'));
+  assert.ok(refusedLine, 'a driving-time non-unique refusal is visible in the activity log');
 });
 
 test('record_step: a cross-page step records login-form locators verified before the submit navigated away', async () => {
@@ -577,13 +601,13 @@ test('scout inconclusive → surfaces the reason and falls back to re-record', a
   assert.match(reply.result.content[0].text, /different approach|Re-record/i, 'still lets the writer retry');
 });
 
-test('scout is bounded: once scouted scoutLimit times, the step goes to a human instead of scouting again', async () => {
+test('scout is bounded but the step is NOT: past scoutLimit, plain refusal keeps iterating (never to a human)', async () => {
   let scoutCalled = 0;
   const h = harness({
     replayStep: failReplay,
     judgeStep: rejectJudge,
     scoutCount: () => 2,             // already scouted twice
-    scoutLimit: 2,                   // limit reached
+    scoutLimit: 2,                   // scout budget spent
     scout: async () => { scoutCalled++; return { resolved: true, report: [] }; },
   });
   h.core.onAgentMessage(clickRecordMsg());
@@ -591,7 +615,12 @@ test('scout is bounded: once scouted scoutLimit times, the step goes to a human 
   const reply = h.toAgent.find(m => m.id === 42);
   assert.equal(scoutCalled, 0, 'scout is NOT summoned again past the limit');
   assert.equal(reply.result.isError, true);
-  assert.match(reply.result.content[0].text, /scout.*2 times|human needs to look|beyond automatic/i, 'hands it to a human');
+  // A rejected step is a STEP problem — it iterates without a cap. A spent scout budget
+  // falls back to a plain refusal that keeps the Writer re-recording, NOT a hand-off to
+  // a human (only the Judger's `attribution` ends a step). So the refusal must tell the
+  // Writer to keep iterating, and must NOT say "human"/"beyond automatic".
+  assert.match(reply.result.content[0].text, /re-drive and re-record|keep iterating/i, 'keeps the writer iterating');
+  assert.doesNotMatch(reply.result.content[0].text, /human needs to|beyond automatic recording/i, 'does NOT hand a step problem to a human');
 });
 
 test('every reject writes exactly one reject verdict line (the single-writer rule)', async () => {
@@ -783,6 +812,21 @@ test('judgeActivityLine reads outcome, round and note', () => {
     '[judge] step "Then status is Draft" → reject  (round 2) — the row shows Planned');
 });
 
+test('msSuffix formats a duration, or empty when unknown', () => {
+  assert.equal(msSuffix(41200), ' [41.2s]');
+  assert.equal(msSuffix(820), ' [0.8s]');
+  assert.equal(msSuffix(null), '');
+  assert.equal(msSuffix(undefined), '');
+  assert.equal(msSuffix(NaN), '');
+});
+
+test('activity lines carry a [Ns] suffix when a duration is given', () => {
+  assert.equal(judgeActivityLine('When I click Save', 'accept', { round: 1, ms: 41200 }),
+    '[judge] step "When I click Save" → accept  (round 1) [41.2s]');
+  assert.equal(shadowActivityLine('When I click Save', { ok: true }, { ms: 820 }),
+    '[shadow] step "When I click Save" → ok [0.8s]');
+});
+
 test('a shadow replay writes a [shadow] activity line for the step', async () => {
   const h = harness({ replayStep: async () => ({ ok: true }) });
   h.core.onAgentMessage(gotoRecordMsg());
@@ -815,4 +859,34 @@ test('a judge reject writes a [judge] reject activity line', async () => {
   const rejectLines = h.activity.filter(a => a.line.includes('→ reject'));
   assert.equal(rejectLines.length, 1, 'the reject is recorded to the activity log with its reason');
   assert.match(rejectLines[0].line, /the filter did not apply/);
+});
+
+test('a recorded step writes one per-step timing record (accept path)', async () => {
+  const h = harness({
+    replayStep: async () => ({ ok: false, phase: 'assertion', index: 0, before: { url: '/x' }, after: { url: '/y' } }),
+    judgeStep: async () => ({ outcome: 'accept', report: [{ where: 'w', problem: 'confirmed', suggestion: 'proceed' }] }),
+  });
+  h.core.onAgentMessage(gotoRecordMsg());
+  await new Promise(r => setImmediate(r));
+  assert.equal(h.timing.length, 1, 'exactly one timing record is written for the step');
+  const t = h.timing[0].entry;
+  assert.equal(t.outcome, 'accept');
+  assert.equal(t.step, 1);
+  assert.ok(Number.isFinite(t.replayMs), 'replay phase is timed');
+  assert.ok(Number.isFinite(t.judgeMs), 'judge phase is timed');
+  assert.ok(Number.isFinite(t.totalMs), 'total is timed');
+});
+
+test('a rejected+scouted step records scoutMs in its timing', async () => {
+  const h = harness({
+    replayStep: async () => ({ ok: false, phase: 'assertion', index: 0, before: { url: 'u' }, after: { url: 'u' } }),
+    judgeStep: async () => ({ outcome: 'reject', report: [{ where: 'list', problem: 'count is 0', suggestion: 'fix' }] }),
+    scout: async () => ({ resolved: false, unresolvable: true, report: [] }),
+  });
+  h.core.onAgentMessage(clickRecordMsg());
+  await new Promise(r => setImmediate(r));
+  assert.equal(h.timing.length, 1);
+  const t = h.timing[0].entry;
+  assert.equal(t.outcome, 'reject');
+  assert.ok(Number.isFinite(t.scoutMs), 'the scout phase is timed on a reject');
 });

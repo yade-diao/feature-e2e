@@ -70,6 +70,40 @@ import { target } from './target.mjs';
 import { runAction, runAssertion, resolveValues, buildLocator } from './record-interpret.mjs';
 import { isMutatingEvaluateFn } from './mcp-routing.mjs';
 
+/**
+ * The allowance for the page to REACH its loaded state (networkidle) in _settle(),
+ * and for an action/assertion to EXECUTE once state has confirmed the target is there.
+ *
+ * This is the "let it actually happen" budget, not a "fail if slower than N" gate:
+ *   - _settle waits up to here for networkidle — a UI5 view/data load or a login IDP
+ *     round-trip can take many seconds, and settling too early would read a half-loaded
+ *     page and wrongly call an element absent. It stays best-effort (a page that never
+ *     idles falls through and we read current state), so this is a ceiling, not a hang.
+ *   - a located action (click/fill) and an assertion run under this same budget, so a
+ *     login click that triggers a cross-domain redirect, or a UI5 control that settles
+ *     over a second, completes instead of being killed by a short clock.
+ * Fast failure stays state-driven: _settle()+count() decide "loaded and still absent →
+ * fail now" BEFORE the action runs; this budget only governs how long a confirmed-present
+ * target's action is allowed to complete. Kept equal to the recording config's 120s so
+ * the shadow acts the way the rendered spec's replay would. goto/navigation use it too.
+ */
+const ACTION_SETTLE_MS = 120_000;
+
+/**
+ * The window an assertion is given to hold, AFTER _settle() has let the page reach its
+ * loaded state. An assertion is a READ of a settled page — the agent recorded it, the
+ * shadow only checks whether it holds. Once networkidle has arrived the state is fixed:
+ * the recorded condition is either true now or it is not, so a settled page needs only
+ * a brief window for the check, not the long ACTION_SETTLE_MS an action's own effect
+ * needs. Keeping this short is what stops a recorded-but-wrong assertion (a heading name
+ * that does not exist on the real page) from waiting out two minutes before the Judger
+ * even gets to rule — the shadow reports "did not hold" quickly and the Judger, looking
+ * at the real page, decides whether the STEP is good (the login happened) despite the
+ * agent's assertion being off. This is not a clock deciding the outcome: _settle (state)
+ * gates the read, the Judger owns the verdict; this only bounds a single post-settle read.
+ */
+const ASSERT_HOLD_MS = 5_000;
+
 /** Line-delimited JSON reader: feed chunks, get back complete parsed messages. */
 class ReadBuffer {
   constructor() { this._buf = ''; }
@@ -124,9 +158,14 @@ export class ShadowRunner {
     // instead of judging it on a page an earlier step never actually reached. Cleared
     // on a clean step and on a full reset (the state is trustworthy again).
     this._dirty = false;
-    // expect with the recording config's 15s expect timeout, not the 120s action
-    // default the context carries.
-    this._expect = baseExpect.configure({ timeout: 15_000 });
+    // Assertions run in _step AFTER _settle() has let the page reach its loaded state,
+    // so the condition is read against a settled page. They get ASSERT_HOLD_MS — a brief
+    // post-settle window, NOT the long action budget: the recorded condition either holds
+    // on the settled page or it does not, and a recorded-but-wrong assertion (a heading
+    // name that is not on the real page) must fail fast and hand off to the Judger, not
+    // wait out two minutes first. _settle (state) gates the read; the Judger owns the
+    // verdict on the real page — this window only bounds the single post-settle check.
+    this._expect = baseExpect.configure({ timeout: ASSERT_HOLD_MS });
   }
 
   /** Dispatch one protocol request to its handler; never throws — errors become ok:false. */
@@ -176,11 +215,15 @@ export class ShadowRunner {
       locale: 'zh-CN',
       viewport: { width: 1440, height: 900 },
     });
-    // Match the recording config's timeouts: 120s action, 15s expect. A resident
-    // login flow (SAML redirects) can be slow; the generous action timeout is why
-    // the login step is not mistaken for a recording error.
-    this._context.setDefaultTimeout(120_000);
-    this._context.setDefaultNavigationTimeout(120_000);
+    // Fast failure is STATE-driven, not clock-driven: _step calls _settle() (wait for
+    // networkidle) then count() (is the target there now?) and fails BEFORE the action
+    // if the loaded page lacks the target — see _step. So the default action/navigation
+    // timeout is NOT a short "fail fast" clock; it is the budget for a confirmed-present
+    // target's action to actually complete (a login click that redirects across the IDP
+    // domain, a UI5 control that settles over a second). A short 2s clock here was wrong
+    // — it timed out a real login navigation. Both get ACTION_SETTLE_MS.
+    this._context.setDefaultTimeout(ACTION_SETTLE_MS);
+    this._context.setDefaultNavigationTimeout(ACTION_SETTLE_MS);
     this._page = await this._context.newPage();
     return { ok: true };
   }
@@ -222,6 +265,35 @@ export class ShadowRunner {
     // marks the shadow dirty: the page was left mid-step, not rolled back, so the
     // next step must not be judged on it blindly (the proxy rebuilds to prefix first).
     for (const [i, action] of (record.actions ?? []).entries()) {
+      // State-driven, not clock-driven: before acting, let the page reach its loaded
+      // state (_settle waits for the networkidle STATE to arrive), then wait for the
+      // target to reach the ATTACHED state. This is a STATE wait, not a fixed pause and
+      // not an instant snapshot: `waitFor({state:'attached'})` resolves the moment the
+      // element exists. A bare instant count() was wrong here — a wizard control that
+      // renders a beat after a prior click (a value-help dialog row, a grid that fills
+      // after a selection) is NOT on the page at the networkidle instant but appears
+      // right after, and an instant count() called it "absent" and failed a step that
+      // was really just mid-render. waitFor lets a truly-absent target (a wrong page)
+      // still fail — it rejects when the element never attaches, bounded only by the
+      // context's ACTION_SETTLE_MS safety net, never used as the decision itself. goto
+      // navigates by itself; press acts on an already-driven field — both exempt.
+      if (action.method !== 'goto' && action.method !== 'press') {
+        await this._settle();
+        const driving = action.locators?.[0];
+        if (driving) {
+          let present = false;
+          try {
+            await buildLocator(this._page, driving).first().waitFor({ state: 'attached' });
+            present = true;
+          } catch { present = false; }
+          if (!present) {
+            this._dirty = true;
+            return { ok: false, dirty: true, reason: 'element-absent',
+              error: `target absent on the loaded page (action[${i}] ${action.method})`,
+              phase: 'action', index: i, before, after: await this._captureState() };
+          }
+        }
+      }
       try {
         await runAction(this._page, action, this._values);
       } catch (e) {
@@ -229,6 +301,9 @@ export class ShadowRunner {
         return { ok: false, dirty: true, error: e?.message ?? String(e), phase: 'action', index: i, before, after: await this._captureState() };
       }
     }
+    // Let any action-triggered view/data load settle before checking assertions, so
+    // an assertion is read against the settled state, not a mid-render frame.
+    await this._settle();
     for (const [i, as] of (record.assertions ?? []).entries()) {
       try {
         await runAssertion(this._page, this._expect, as, this._values);
@@ -240,6 +315,24 @@ export class ShadowRunner {
     // A clean step: the accumulated state matches the trace again.
     this._dirty = false;
     return { ok: true, before, after: await this._captureState() };
+  }
+
+  /**
+   * Let the page reach its loaded state before we read/act on it — a STATE wait, not
+   * a clock wait. `networkidle` is the signal a UI5 view/data load has resolved (hash
+   * routing does not re-fire load/domcontentloaded, but it does fetch and then go
+   * quiet). This is how "wait until the page has finished loading" is expressed as a
+   * STATE, not a fixed pause: we wait for the networkidle state to actually arrive, we
+   * do not sleep a number. Best-effort: some pages hold a long-poll/heartbeat and never
+   * reach full networkidle; waitForLoadState then settles when it can and, in the worst
+   * case, is bounded by the context default only as a safety net against an infinite
+   * hang — never as the thing that decides a step's outcome (that is count()/the
+   * assertion, read after settling). Any error is swallowed; settling only exists to
+   * read a truthful, finished-loading state.
+   */
+  async _settle() {
+    try { await this._page.waitForLoadState('networkidle'); }
+    catch { /* never fully idled (long-poll/heartbeat) — read the current state as-is */ }
   }
 
   /**
@@ -426,8 +519,8 @@ export class ShadowRunner {
     this._context = await this._browser.newContext({
       baseURL: this._origin, locale: 'zh-CN', viewport: { width: 1440, height: 900 },
     });
-    this._context.setDefaultTimeout(120_000);
-    this._context.setDefaultNavigationTimeout(120_000);
+    this._context.setDefaultTimeout(ACTION_SETTLE_MS);
+    this._context.setDefaultNavigationTimeout(ACTION_SETTLE_MS);
     this._page = await this._context.newPage();
     this._values = {};
     for (const [i, rec] of (records ?? []).entries()) {

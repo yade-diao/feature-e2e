@@ -176,22 +176,40 @@ function renderArg(arg) {
  * own `key` field (`'Enter'`, `'Tab'`), not in `arg` — `arg` carries a fill's
  * text value, a different thing. It renders as `.press('Enter')`; the key is a
  * fixed literal, never a value ref.
+ *
+ * `seedTimeoutMs` / `navTimeoutMs` are the state-driven ceilings a RESUME SEED
+ * passes so a stale prefix fails fast on the FIRST stale step instead of waiting
+ * out the config's 120s test budget. An action that drives a vanished element
+ * (a click/fill whose target is gone on a stale prefix) is the biggest hang —
+ * bigger than an assertion, since an unset actionTimeout lets it run to the whole
+ * test's 120s. So a located action gets `{ timeout: seedTimeoutMs }` (2s, "the
+ * page loaded and the target still is not here → fail now"), while `goto` gets
+ * the longer `navTimeoutMs` — a navigation is an ARRIVAL we must let complete, and
+ * a remote environment's cold first paint needs far more than 2s. The promoted
+ * spec passes neither (undefined → the bare form, byte-for-byte), so CI is untouched.
  */
-function renderAction(action) {
+function renderAction(action, { seedTimeoutMs, navTimeoutMs } = {}) {
   const { method, locators, arg, key } = action;
 
   if (method === 'goto') {
     const raw = arg && 'literal' in arg ? String(arg.literal) : '';
     const path = raw.replace(/^https?:\/\/[^/]+/, '') || '/';
-    return `  await page.goto(${q(path)});`;
+    const opts = navTimeoutMs != null ? `, { timeout: ${navTimeoutMs} }` : '';
+    return `  await page.goto(${q(path)}${opts});`;
   }
 
   const loc = renderLocator(locators, { forAction: true });
+  const t = seedTimeoutMs != null ? `{ timeout: ${seedTimeoutMs} }` : '';
   if (method === 'press') {
-    return `  await ${loc}.press(${q(key)});`;
+    // press(key, options): the key is the positional arg, the timeout the options.
+    const opts = t ? `, ${t}` : '';
+    return `  await ${loc}.press(${q(key)}${opts});`;
   }
   const argStr = arg != null ? renderArg(arg) : '';
-  return `  await ${loc}.${method}(${argStr});`;
+  // Every other method is `method(arg?, options?)`: the timeout options object goes
+  // AFTER any positional arg (fill('x', {timeout}); click({timeout})).
+  const opts = t ? (argStr ? `, ${t}` : t) : '';
+  return `  await ${loc}.${method}(${argStr}${opts});`;
 }
 
 /**
@@ -240,30 +258,43 @@ export function regexFragmentSource(s) {
  * than one candidate; a single-candidate assertion stays a single locator, which
  * is the honest "this element must be here" signal.
  */
-function renderAssertion(as) {
+function renderAssertion(as, { seedTimeoutMs } = {}) {
   const target = orChain(as.target);
   const { matcher, value } = as;
+  // A resume seed replays a known-good prefix only to bring the browser back to the
+  // stuck step's starting state. On a prefix that has since gone stale (a step that
+  // was never cleanly recorded), a bare web-first expect waits out the config's
+  // 15s/120s before failing — 91-step recordings have hung for two minutes here. So
+  // a seed render passes a short state-driven ceiling (seedTimeoutMs): the same
+  // "the page has loaded and the condition still does not hold → fail now, don't wait
+  // out a clock" the shadow runner uses. The PROMOTED spec never passes it (undefined
+  // → the existing bare form, byte-for-byte), so CI's real 120s regression budget is
+  // untouched — only the seed replay fails fast so the agent can take over the step.
+  const t = seedTimeoutMs != null ? `, { timeout: ${seedTimeoutMs} }` : '';
   if (NULLARY_MATCHERS.has(matcher) || value == null) {
-    return `  await expect(${target}).${matcher}();`;
+    // No matcher argument — the timeout options object, if any, is the sole argument
+    // (so drop the leading comma the other branches need).
+    const solo = seedTimeoutMs != null ? `{ timeout: ${seedTimeoutMs} }` : '';
+    return `  await expect(${target}).${matcher}(${solo});`;
   }
   // A dynamic value (a ref captured earlier) is passed through as the variable on
   // any matcher — never regex-wrapped, it is already the exact value to match.
-  if ('ref' in value) return `  await expect(${target}).${matcher}(${value.ref});`;
+  if ('ref' in value) return `  await expect(${target}).${matcher}(${value.ref}${t});`;
   // A text-content matcher with a FIXED string matches it as a regex FRAGMENT
   // (substring), so the assertion tolerates whitespace/markup the page renders
   // around the word — `toHaveText('Draft')` would demand the WHOLE trimmed text be
   // exactly "Draft" and break on "Draft ". record-interpret wraps the same value the
   // same way, so the replay matches identically.
   if (TEXT_FRAGMENT_MATCHERS.has(matcher) && typeof value.literal === 'string') {
-    return `  await expect(${target}).${matcher}(new RegExp(${q(regexFragmentSource(value.literal))}));`;
+    return `  await expect(${target}).${matcher}(new RegExp(${q(regexFragmentSource(value.literal))})${t});`;
   }
   // A numeric value on a numeric matcher (toHaveCount(0), toBeGreaterThan…) goes
   // through bare. A number on a TEXT matcher is invalid and is rejected at write
   // time (validateRecord), so it never reaches here.
-  if (typeof value.literal === 'number') return `  await expect(${target}).${matcher}(${value.literal});`;
+  if (typeof value.literal === 'number') return `  await expect(${target}).${matcher}(${value.literal}${t});`;
   // Any other fixed string (e.g. toHaveValue) is an exact literal — an input value
   // asserted equal to X means exactly X.
-  return `  await expect(${target}).${matcher}(${q(value.literal)});`;
+  return `  await expect(${target}).${matcher}(${q(value.literal)}${t});`;
 }
 
 /**
@@ -283,19 +314,20 @@ function renderAssertion(as) {
  * never checked: an assertion legitimately matches ≠1 (absence, a list count) and
  * verify.md blesses a single/`.or()` assertion locator.
  */
-export function renderStepBlock(record, { checkLocators = false } = {}) {
+export function renderStepBlock(record, { checkLocators = false, seedTimeoutMs, navTimeoutMs } = {}) {
   const lines = [];
   lines.push(`    await test.step(${q(record.step)}, async () => {`);
+  const t = seedTimeoutMs != null ? `, { timeout: ${seedTimeoutMs} }` : '';
   for (const action of record.actions ?? []) {
     if (checkLocators && Array.isArray(action.locators)) {
       for (const c of action.locators) {
-        lines.push(`      await expect(${renderCandidate(c)}).toHaveCount(1);`);
+        lines.push(`      await expect(${renderCandidate(c)}).toHaveCount(1${t});`);
       }
     }
-    lines.push('  ' + renderAction(action));
+    lines.push('  ' + renderAction(action, { seedTimeoutMs, navTimeoutMs }));
   }
   for (const as of record.assertions ?? []) {
-    lines.push('  ' + renderAssertion(as));
+    lines.push('  ' + renderAssertion(as, { seedTimeoutMs }));
   }
   lines.push('    });');
   return lines.join('\n');
@@ -334,6 +366,18 @@ function renderValueConsts(values) {
  *                non-unique candidate reds in the locating layer. Used to build
  *                the uniqueness-check spec (gates.mjs uniquenessReplayGate); the
  *                promoted spec is rendered without it.
+ * @param seedTimeoutMs  optional short state-driven timeout (ms) injected into
+ *                every rendered assertion AND located action — the ceiling a
+ *                RESUME SEED uses so a stale prefix fails fast (2s) on the first
+ *                stale step instead of waiting out the config's 15s/120s. Actions
+ *                are the biggest hang (an unset actionTimeout lets a click on a
+ *                vanished element run to the whole test's 120s), so they get it
+ *                too, not just assertions. The promoted spec is rendered WITHOUT it
+ *                (undefined → the bare form, byte-for-byte), so CI is untouched.
+ * @param navTimeoutMs  optional timeout (ms) injected into `page.goto(...)` for a
+ *                seed render — navigation is an arrival that must be allowed to
+ *                complete, so it gets a longer allowance than seedTimeoutMs (a
+ *                remote cold first paint needs far more than 2s).
  *
  * The whole feature renders as a single `test(...)` so its scenarios share one
  * browser context (a recording is a continuous flow: log in, then act as that
@@ -342,7 +386,7 @@ function renderValueConsts(values) {
  * so a dynamic value shared across scenarios (Create's name, Edit's search) is
  * one variable.
  */
-export function renderSpec(trace, { upto, checkLocators = false } = {}) {
+export function renderSpec(trace, { upto, checkLocators = false, seedTimeoutMs, navTimeoutMs } = {}) {
   const records = upto == null ? trace : trace.slice(0, upto);
 
   // Merge every record's values into one map (later wins on collision — a value
@@ -399,7 +443,7 @@ export function renderSpec(trace, { upto, checkLocators = false } = {}) {
     if (!firstScenario) out.push('');
     firstScenario = false;
     out.push(`    // Scenario: ${scenario}`);
-    out.push(recs.map(rec => renderStepBlock(rec, { checkLocators })).join('\n'));
+    out.push(recs.map(rec => renderStepBlock(rec, { checkLocators, seedTimeoutMs, navTimeoutMs })).join('\n'));
   }
   out.push('  });');
   out.push('');

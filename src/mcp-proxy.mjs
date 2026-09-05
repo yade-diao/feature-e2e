@@ -75,20 +75,27 @@ export function serialize(msg) {
  *   ok        → `[shadow] step "…" → ok`
  *   failure   → `[shadow] step "…" → FAIL (phase: error)`
  */
-export function shadowActivityLine(step, verdict) {
+export function shadowActivityLine(step, verdict, { ms = null } = {}) {
   const s = String(step ?? '').slice(0, 40);
-  if (verdict?.ok !== false) return `[shadow] step "${s}" → ok`;
+  const t = msSuffix(ms);
+  if (verdict?.ok !== false) return `[shadow] step "${s}" → ok${t}`;
   const phase = verdict.phase ?? 'step';
   const err = String(verdict.error ?? '').replace(/\s+/g, ' ').slice(0, 80);
-  return `[shadow] step "${s}" → FAIL (${phase}${err ? ': ' + err : ''})`;
+  return `[shadow] step "${s}" → FAIL (${phase}${err ? ': ' + err : ''})${t}`;
 }
 
 /** Format one activity line for a Judger outcome on a step. Pure/testable. */
-export function judgeActivityLine(step, outcome, { round = null, note = null } = {}) {
+export function judgeActivityLine(step, outcome, { round = null, note = null, ms = null } = {}) {
   const s = String(step ?? '').slice(0, 40);
   const r = round != null ? `  (round ${round})` : '';
   const n = note ? ` — ${String(note).replace(/\s+/g, ' ').slice(0, 100)}` : '';
-  return `[judge] step "${s}" → ${outcome}${r}${n}`;
+  return `[judge] step "${s}" → ${outcome}${r}${n}${msSuffix(ms)}`;
+}
+
+/** ` [41.2s]` for a millisecond duration, or '' when unknown. Pure/testable. */
+export function msSuffix(ms) {
+  if (ms == null || !Number.isFinite(ms)) return '';
+  return ` [${(ms / 1000).toFixed(1)}s]`;
 }
 
 /**
@@ -117,6 +124,28 @@ export function appendActivity(featurePath, line, { append = appendFileSync } = 
   } catch { /* best-effort */ }
 }
 
+/** The per-step timing log path for a feature, next to its activity log. */
+function timingLogPath(featurePath) {
+  const base = basename(featurePath).replace(/\.feature$/, '');
+  return join(reportPaths(featurePath).dir, `${base}.timing.jsonl`);
+}
+
+/**
+ * Append one machine-readable per-step timing record (one JSON object per line) to
+ * `<Feature>.timing.jsonl`. Pure instrumentation: like appendActivity, strictly
+ * best-effort — a write error is swallowed and NEVER fails a recording. `entry` is
+ * the timing object collected in _handleRecordStep (step, title, replayMs, judgeMs,
+ * scoutMs, rounds, outcome, totalMs). `cli.mjs timing` reads this back.
+ */
+export function appendTiming(featurePath, entry, { append = appendFileSync } = {}) {
+  if (!featurePath) return;
+  try {
+    const path = timingLogPath(featurePath);
+    try { mkdirSync(reportPaths(featurePath).dir, { recursive: true }); } catch { /* exists */ }
+    append(path, `${JSON.stringify({ ts: new Date().toISOString(), ...entry })}\n`);
+  } catch { /* best-effort */ }
+}
+
 /**
  * The proxy's decision engine.
  *
@@ -131,7 +160,8 @@ export class ProxyCore {
                 replayStep = null, truncate = truncateTrace, judgeStep = null,
                 scout = null, appendVerdict = null, judgeRound: judgeRound_ = null, priorVerdicts: priorVerdicts_ = null,
                 scoutCount: scoutCount_ = null, scoutLimit = 2, resetShadow = null, readPrefix = null,
-                appendActivity: appendActivity_ = null } = {}) {
+                appendActivity: appendActivity_ = null,
+                appendTiming: appendTiming_ = null } = {}) {
     this._toAgent = sendToAgent;
     this._toUpstream = sendToUpstream;
     this._append = appendRecord;
@@ -206,7 +236,10 @@ export class ProxyCore {
     // so tests can capture lines without touching the filesystem; defaults to the
     // module-level appendActivity which writes the same file recorder.mjs uses.
     this._activity = (featurePath, line) => (appendActivity_ ?? appendActivity)(featurePath, line);
+    // Append one per-step timing record (pure instrumentation). Injectable for tests.
+    this._timing = (featurePath, entry) => (appendTiming_ ?? appendTiming)(featurePath, entry);
     this._readPrefix = readPrefix ?? (f => readTrace(f));
+    this._currentFeature = null;   // last feature seen on a record_step, for _handleAction's activity log
     this._shadowAligned = false;   // one-shot: resume alignment before the first replay only
     // Whether the LAST shadow step left the shadow's accumulated state possibly
     // diverged from the trace (a step whose action/assertion failed, leaving the page
@@ -264,6 +297,7 @@ export class ProxyCore {
     try {
       const count = await this._evalOnCandidate(target, '() => 1', interpretEvaluateReply);
       if (count !== 1) {
+        this._activity(this._currentFeature, `[action] REFUSED not-unique (${count == null ? '?' : count} matches) ${toolName} ${JSON.stringify(target).slice(0, 100)}`);
         this._toAgent(toolResult(msg.id,
           `${toolName} target ${JSON.stringify(target)} is not unique on the page: it matched `
           + `${count == null ? 'a number that could not be read' : count} element(s), not exactly one. `
@@ -274,6 +308,7 @@ export class ProxyCore {
       if (actionNeedsEditable(toolName)) {
         const editable = await this._evalOnCandidate(target, editabilityCheckExpr(), interpretEditabilityReply);
         if (editable !== true) {
+          this._activity(this._currentFeature, `[action] REFUSED not-editable (wrapper) ${toolName} ${JSON.stringify(target).slice(0, 100)}`);
           this._toAgent(toolResult(msg.id,
             `${toolName} target ${JSON.stringify(target)} is not editable — it resolves to a wrapper, not the `
             + `native input. Chain to the inner field (e.g. \`.locator('#inner')\`) so the fill lands on a real `
@@ -362,6 +397,9 @@ export class ProxyCore {
       this._toAgent(toolResult(msg.id, 'record_step: missing "feature" (the .feature path this step belongs to)', true));
       return;
     }
+    // Remember the feature so _handleAction (whose action-tool calls carry no
+    // feature field) can log a driving-time locator refusal to the same activity log.
+    this._currentFeature = featurePath;
     // The record is the arguments minus the routing-only fields. `stillHolds` is
     // the Writer's optional push-back on a prior Judger refusal (why the effect DID
     // happen); `attribution` is the Writer's optional claim that a failure is a
@@ -371,6 +409,13 @@ export class ProxyCore {
     const stillHolds = record.stillHolds ?? null;
     const attribution = record.attribution ?? null;
     delete record.feature; delete record.featurePath; delete record.stillHolds; delete record.attribution;
+
+    // Per-step timing (pure instrumentation). Filled in as the step passes through
+    // replay / judge / scout; written once at the end via finally, so it covers
+    // every return path without touching the control flow. Never affects behaviour.
+    const _t0 = performance.now();
+    const timing = { step: null, title: record.step ?? null, scenario: record.scenario ?? null,
+      replayMs: null, judgeMs: null, scoutMs: null, rounds: null, outcome: null, totalMs: null };
 
     try {
       // Each action's DRIVING locator (its first candidate) must be one verified as
@@ -387,6 +432,12 @@ export class ProxyCore {
       if (unverified.length) {
         const lines = unverified.map(u =>
           `  action[${u.actionIndex}] (${u.method}) locator ${JSON.stringify(u.expr)}`);
+        timing.outcome = 'refused-unverified-locator';
+        // The direct trigger of a "created then had to delete and redo" loop: the
+        // recorded locator was not the one driven (e.g. a `.first()` slipped into the
+        // record). Make it visible in the shared activity log, not just the swallowed
+        // stderr, so a reader can see WHY a step was turned away.
+        this._activity(featurePath, `[record_step] REFUSED unverified-locator step "${String(record.step ?? '').slice(0, 40)}" — ${unverified.length} action(s) recorded a locator not driven: ${unverified.map(u => u.expr).join(' | ').slice(0, 200)}`);
         process.stderr.write(`[record_step] REFUSED (unverified locator) step ${JSON.stringify(record.step)}: `
           + `${unverified.length} action(s) not driven by the recorded locator\n`);
         this._toAgent(toolResult(msg.id,
@@ -399,6 +450,7 @@ export class ProxyCore {
       }
       this._append(featurePath, record);   // appendTrace runs validateRecord and throws on a bad shape
       const n = this._count(featurePath);
+      timing.step = n;
 
       // Step-wise shadow replay is now a FACT SOURCE, not a gate: run the record on
       // the resident shadow and collect what happened, but do NOT judge it here. A
@@ -456,26 +508,31 @@ export class ProxyCore {
           }
         }
         let verdict;
+        const _tReplay = performance.now();
         try {
           verdict = await this._replayStep(record);
         } catch (e) {
           // The shadow itself errored (transport, launch). Do NOT fail the step on
           // infrastructure. Accept, logging the shadow miss; the full replay gate
           // remains the backstop.
+          timing.replayMs = Math.round(performance.now() - _tReplay);
+          timing.outcome = 'shadow-unavailable';
           process.stderr.write(`[record_step] shadow replay unavailable for step ${n} (${e?.message ?? e}); accepting without step-wise check\n`);
           this._toAgent(toolResult(msg.id, `recorded step ${n} (shadow unavailable)`));
           return;
         }
+        timing.replayMs = Math.round(performance.now() - _tReplay);
         // Carry the shadow's divergence forward: a failed step (dirty) means the next
         // step must rebuild to prefix (above) before it is judged.
         this._shadowDirty = verdict?.dirty === true;
         // Record what the shadow's mechanical replay of this step did, into the shared
         // activity log — so a reader sees the shadow's verdict step by step (single
         // step, ok or FAIL) alongside the writer's own actions, in one place.
-        this._activity(featurePath, shadowActivityLine(record.step, verdict));
+        this._activity(featurePath, shadowActivityLine(record.step, verdict, { ms: timing.replayMs }));
         replayFacts = {
           mechOk: verdict?.ok !== false,
           error: verdict?.error, phase: verdict?.phase, index: verdict?.index,
+          reason: verdict?.reason,   // state-driven cause (e.g. 'element-absent') when the shadow judged by state, not a clock
           before: verdict?.before, after: verdict?.after,
         };
         // D6 — a CERTAIN mechanical failure, offered to the Judger as a stronger
@@ -498,25 +555,31 @@ export class ProxyCore {
       // state-changing ones. No Judger wired → nothing to rule; accept.
       const mustJudge = !!this._judgeStep;
       if (!mustJudge) {
+        timing.outcome = 'accept-no-judge';
         process.stderr.write(`[record_step] recorded step ${n}: ${JSON.stringify(record.step)}\n`);
         this._toAgent(toolResult(msg.id, `recorded step ${n}`));
         return;
       }
 
       let judged;
+      const _tJudge = performance.now();
       try {
         judged = await this._judgeStep(record, featurePath, stillHolds, replayFacts, attribution);
       } catch (e) {
         // A tooling failure (spawn, crash) is never the Writer's fault. Accept the
         // step; the full replay gate stays the backstop.
+        timing.judgeMs = Math.round(performance.now() - _tJudge);
+        timing.outcome = 'judge-unavailable';
         process.stderr.write(`[record_step] judger unavailable for step ${n} (${e?.message ?? e}); accepting without business-effect check\n`);
         this._toAgent(toolResult(msg.id, `recorded step ${n} (judger unavailable)`));
         return;
       }
+      timing.judgeMs = Math.round(performance.now() - _tJudge);
       if (judged && judged.atLimit) {
         // Writer and Judger reached the duel limit without agreeing. Stop the thrash:
         // accept as-is and flag for a human, rather than loop forever. The full
         // replay gate still runs over the finished feature.
+        timing.outcome = 'atLimit';
         process.stderr.write(`[record_step] judger duel limit reached for step ${n} ${JSON.stringify(record.step)}; accepting current record, flag for human review\n`);
         this._toAgent(toolResult(msg.id, `recorded step ${n} (judger unresolved after repeated rounds — accepted as-is; a human should review this step)`));
         return;
@@ -525,21 +588,24 @@ export class ProxyCore {
         // The Judger could not produce a trustworthy verdict (crash, no file, or it
         // ruled the shadow was on the wrong page). Accept rather than blame the agent
         // — same discipline as an inconclusive replay.
+        timing.outcome = 'inconclusive';
         process.stderr.write(`[record_step] judger inconclusive for step ${n}: ${judged.inconclusive}; accepting\n`);
-        this._activity(featurePath, judgeActivityLine(record.step, 'inconclusive', { note: judged.inconclusive }));
+        this._activity(featurePath, judgeActivityLine(record.step, 'inconclusive', { note: judged.inconclusive, ms: timing.judgeMs }));
         this._toAgent(toolResult(msg.id, `recorded step ${n}`));
         return;
       }
 
       const round = this._judgeRoundFor(featurePath, record) + 1;
+      timing.rounds = round;
       switch (judged?.outcome) {
         case 'accept':
           // The Judger ruled the step held — including a terminal action it CONFIRMED
           // on the new page (D3: it may not accept a transition without verifying the
           // step's effect there). The step stays in the trace, NOT truncated. One
           // verdict line records the ruling.
+          timing.outcome = 'accept';
           this._logVerdict(featurePath, { record, round, outcome: 'accept', report: judged.report, rebuttal: judged.rebuttal });
-          this._activity(featurePath, judgeActivityLine(record.step, 'accept', { round }));
+          this._activity(featurePath, judgeActivityLine(record.step, 'accept', { round, ms: timing.judgeMs }));
           process.stderr.write(`[record_step] step ${n} ${JSON.stringify(record.step)} accepted by judger${replayFacts?.mechOk === false ? ' (terminal transition, verified on the new page)' : ''}\n`);
           this._toAgent(toolResult(msg.id,
             replayFacts?.mechOk === false
@@ -553,13 +619,15 @@ export class ProxyCore {
           // (the page navigated away — a full prefix replay IS needed to get back)
           // from a same-page failure (the shadow is still at this step — no replay
           // needed, the scout explores in place).
-          await this._rejectStep(msg.id, featurePath, record, n, round, { report: judged.report, rebuttal: judged.rebuttal, replayFacts });
+          timing.outcome = 'reject';
+          await this._rejectStep(msg.id, featurePath, record, n, round, { report: judged.report, rebuttal: judged.rebuttal, replayFacts, timing });
           return;
         case 'attribution': {
           // A non-step cause the Judger confirmed (feature/environment/backend/data/
           // component). Not a reject — re-recording cannot fix it. Keep the prior
           // clean steps, stop on this one, hand it to a human. One attribution
           // verdict line records the ruling and its class.
+          timing.outcome = 'attribution';
           this._logVerdict(featurePath, { record, round, outcome: 'attribution', attribution: judged.attribution, report: judged.report });
           this._truncate(featurePath, n - 1);   // this step did not really succeed; drop it
           const cls = judged.attribution?.class ?? 'non-step';
@@ -582,8 +650,17 @@ export class ProxyCore {
           return;
       }
     } catch (e) {
+      if (timing.outcome == null) timing.outcome = 'refused-invalid';
+      this._activity(featurePath, `[record_step] REFUSED invalid-record step "${String(record.step ?? '').slice(0, 40)}" — ${String(e.message).replace(/\s+/g, ' ').slice(0, 120)}`);
       process.stderr.write(`[record_step] REFUSED (invalid record) step ${JSON.stringify(record.step)}: ${e.message}\n`);
       this._toAgent(toolResult(msg.id, `record_step: ${e.message}`, true));
+    } finally {
+      // Write the per-step timing once, covering every return path above. Guarded so
+      // instrumentation can never break a recording.
+      try {
+        timing.totalMs = Math.round(performance.now() - _t0);
+        this._timing(featurePath, timing);
+      } catch { /* best-effort */ }
     }
   }
 
@@ -616,7 +693,7 @@ export class ProxyCore {
    * inconclusive, fall back to a plain refusal with the reason and the tried-and-
    * failed history so the Writer does not repeat a dead end.
    */
-  async _rejectStep(msgId, featurePath, record, n, round, { report, rebuttal, replayFacts = null }) {
+  async _rejectStep(msgId, featurePath, record, n, round, { report, rebuttal, replayFacts = null, timing = null }) {
     this._logVerdict(featurePath, { record, round, outcome: 'reject', report, rebuttal });
     this._activity(featurePath, judgeActivityLine(record.step, 'reject', { round, note: rebuttal ?? report?.[0]?.problem }));
 
@@ -631,30 +708,32 @@ export class ProxyCore {
       `was recorded but an independent judge ruled its business effect did NOT happen`
       + `${rebuttal ? `:\n  ${rebuttal}` : '.'}\n\n${reportText}`;
 
-    // How many times the scout has already investigated this step. A step scouted
-    // scoutLimit times and still failing will not be solved by another scout — hand
-    // it to a human instead of scouting forever.
+    // How many times the scout has already investigated this step. Once the scout
+    // budget is spent, another scout is unlikely to add anything new — but that is NOT
+    // a reason to stop the step. A rejected step is a STEP problem, and a step problem
+    // iterates without a cap (only the Judger ruling `attribution` — a non-step cause —
+    // ends a step for a human). So a spent scout budget falls back to a plain refusal
+    // that keeps the Writer iterating with the dead-end history, exactly like having no
+    // scout wired; it never tells the Writer to stop.
     const scoutsSoFar = (() => {
       try { return this._scoutCount ? this._scoutCount(featurePath, record.scenario, record.step) : scoutCount(featurePath, record.scenario, record.step); }
       catch { return 0; }
     })();
 
     // No scout wired, or the scout budget is spent → a plain refusal with the
-    // dead-end history so a fresh Writer instance does not repeat a tried path.
+    // dead-end history so the Writer keeps trying a different approach. NOT a stop:
+    // the step keeps iterating until it holds or the Judger attributes it to a
+    // non-step cause.
     if (!this._scout || scoutsSoFar >= this._scoutLimit) {
       if (this._scout && scoutsSoFar >= this._scoutLimit) {
-        process.stderr.write(`[record_step] step ${n} ${JSON.stringify(record.step)} scouted ${scoutsSoFar}x already and still failing — handing to a human\n`);
-        this._toAgent(toolResult(msgId,
-          `step ${JSON.stringify(record.step)} has been investigated by an independent scout ${scoutsSoFar} times and `
-          + `still cannot be made to pass. This is beyond automatic recording — stop on this step; a human needs to `
-          + `look at whether the feature step is achievable on this page/environment.`, true));
-        return;
+        process.stderr.write(`[record_step] step ${n} ${JSON.stringify(record.step)} scouted ${scoutsSoFar}x already — no more scouting, but the step keeps iterating (plain refusal)\n`);
       }
       this._toAgent(toolResult(msgId,
         `step ${JSON.stringify(record.step)} ${reason}${this._rejectHistory(featurePath, record)}\n\n`
         + `This step has been rolled back (the ${kept} steps before it are kept). Re-drive and re-record ONLY this `
         + `step so its business logic actually happens, with a DIFFERENT approach than the ones above — do not skip `
-        + `it, do not run Bash, do not proceed to the next step.`, true));
+        + `it, do not run Bash, do not proceed to the next step. Keep iterating: a rejected step is a step problem, `
+        + `not a stopping point — only a genuine non-step cause (which the judge attributes) ends it.`, true));
       return;
     }
 
@@ -663,9 +742,11 @@ export class ProxyCore {
     // shadow_try, then resets again.
     process.stderr.write(`[record_step] step ${n} rejected — escalating to SCOUT (scout ${scoutsSoFar + 1}/${this._scoutLimit})\n`);
     let scouted;
+    const _tScout = performance.now();
     try {
       scouted = await this._scout(record, featurePath, replayFacts);
     } catch (e) {
+      if (timing) timing.scoutMs = Math.round(performance.now() - _tScout);
       process.stderr.write(`[record_step] scout unavailable (${e?.message ?? e}); plain refusal\n`);
       this._toAgent(toolResult(msgId,
         `step ${JSON.stringify(record.step)} ${reason}\n\nRolled back. Re-record this step.`, true));
@@ -675,9 +756,10 @@ export class ProxyCore {
     // Record the scout's outcome as one scout line (resolved / unresolvable /
     // inconclusive alike), so scoutCount bounds re-scouting even on an inconclusive
     // scout that would otherwise write nothing and re-scout forever.
+    if (timing) timing.scoutMs = Math.round(performance.now() - _tScout);
     this._logScout(featurePath, record, round, scouted);
     this._activity(featurePath, `[judge] scout "${String(record.step ?? '').slice(0, 40)}" → ${
-      scouted?.inconclusive ? 'inconclusive' : scouted?.resolved ? 'resolved' : scouted?.unresolvable ? 'unresolvable' : 'done'}`);
+      scouted?.inconclusive ? 'inconclusive' : scouted?.resolved ? 'resolved' : scouted?.unresolvable ? 'unresolvable' : 'done'}${msSuffix(timing?.scoutMs)}`);
 
     if (scouted && scouted.inconclusive) {
       process.stderr.write(`[record_step] scout inconclusive for step ${n}: ${scouted.inconclusive}\n`);
@@ -879,13 +961,12 @@ export function main() {
     // state — the same one generator_setup_page put the Writer's browser at.
     resetShadow: shadow ? (prefix => shadow.resetTo(prefix)) : null,
     judgeStep: judgerOn ? ((record, featurePath, stillHolds, replayFacts, attribution) => {
-      // Stop the Writer↔Judger duel after JUDGE_DUEL_LIMIT rounds on one step: if
-      // they have not agreed by then, accept as-is and flag for a human rather than
-      // loop. The round count is the judge log's memory of this step.
-      const JUDGE_DUEL_LIMIT = Number(process.env.JUDGE_DUEL_LIMIT ?? 2);
-      let round = 0;
-      try { round = judgeRound(featurePath, record.scenario, record.step); } catch { /* fresh log */ }
-      if (round >= JUDGE_DUEL_LIMIT) return Promise.resolve({ atLimit: true });
+      // No round cap on the Writer↔Judger duel: a `reject` is a STEP problem, and a
+      // step problem is always the Writer's to fix (with the knowledge base), never
+      // accepted-as-is or handed to a human on a count. The ONLY stop is the Judger
+      // itself ruling `attribution` — a non-step cause (feature/environment/backend/
+      // data/component) that re-recording cannot fix. So the duel runs until the step
+      // is accepted or the Judger attributes it elsewhere; it is not bounded by rounds.
 
       // The steps already on disk before this one, in the same scenario — the
       // context the Judger reads for "what state should exist now". This record is

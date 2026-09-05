@@ -75,13 +75,26 @@ test('selectKnowledge points at the index, fenced as reference', () => {
   assert.equal(external, null, 'no external clone for an unlinked project');
 });
 
-test('selectKnowledge does not inline the core knowledge', () => {
-  // Progressive disclosure: the body of a core topic must NOT appear in the
-  // pointer — that is the whole change from the full-inject design.
+test('selectKnowledge inlines the engine core knowledge in full', () => {
+  // The core is injected up front (not just pointed at), so the agent applies it
+  // from the first step. A core topic body must appear in the text.
   const { text } = selectKnowledge('features/anything/x.feature');
   const shadow = loadCoreKnowledge().find(d => d.topic === 'web-components-shadow-dom');
-  assert.ok(!text.includes(shadow.text), 'pointer must not carry the topic body');
-  assert.ok(text.length < 1000, 'pointer stays short; it names the index, not the content');
+  assert.ok(text.includes(shadow.text), 'the core topic body is inlined into the knowledge block');
+});
+
+test('selectKnowledge inlines the current feature domain basics and _common', () => {
+  // account-plan is a real domain with a basics file and shared _common.
+  const { text } = selectKnowledge('features/account-plan/AccountPlan.feature');
+  assert.match(text, /### account-plan-basics/, 'the domain basics is inlined');
+  assert.match(text, /### credentials/, 'shared _common credentials is inlined');
+});
+
+test('selectKnowledge does NOT inline another domain’s basics (stays on-demand)', () => {
+  // Recording account-plan must not carry funds/adapter basics — only the current
+  // domain is inlined; others stay on-demand.
+  const { text } = selectKnowledge('features/account-plan/AccountPlan.feature');
+  assert.ok(!/### funds-basics/.test(text), 'another domain basics is not inlined');
 });
 
 test('selectKnowledge reports an external clone when one is synced', () => {
@@ -234,12 +247,12 @@ test('buildPrompt omits the block when there is no pointer', () => {
 
 // ── end-to-end: a real record prompt carries the index pointer ───────────────
 
-test('a real recorder prompt names the index and tells the agent to read it', () => {
+test('a real recorder prompt carries the inlined core and still names the index for reference', () => {
   const knowledge = selectKnowledge('features/anything/x.feature').text;
   const p = buildPrompt({
     featurePath: 'features/anything/x.feature', specPath: 'run/anything/x.spec.ts',
     featureText: 'Feature: F', baseURL: 'https://example.com', knowledge,
   });
-  assert.ok(p.includes('INDEX.md'), 'the index path reaches the prompt');
-  assert.match(p, /Read that index first/, 'and the instruction to read it on demand');
+  assert.ok(p.includes('INDEX.md'), 'the index path still reaches the prompt for reference');
+  assert.match(p, /Core knowledge \(below, in full/, 'the core is inlined into the prompt, not just pointed at');
 });

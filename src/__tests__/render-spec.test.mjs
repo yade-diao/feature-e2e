@@ -184,6 +184,71 @@ test('render checkLocators: the injected spec still parses and clears every gate
   f.cleanup();
 });
 
+// ── seedTimeoutMs / navTimeoutMs: the state-driven ceilings a resume seed uses ─
+// A resume seed renders with short timeouts so a stale prefix fails fast (assertions
+// AND actions at 2s, goto at a longer nav allowance) instead of waiting out the
+// config's 15s/120s; the promoted spec renders WITHOUT them and must stay
+// byte-for-byte the bare form (CI's 120s budget untouched).
+
+test('seedTimeoutMs: omitting it leaves the promoted spec byte-for-byte unchanged', () => {
+  // The default render is the contract CI replays against — injecting nothing must
+  // produce exactly the same text as before this option existed.
+  const bare = renderSpec(FULL_TRACE);
+  assert.doesNotMatch(bare, /\{ timeout:/, 'no timeout option anywhere in the promoted spec');
+  // Assertions stay the bare web-first form.
+  assert.match(bare, /await expect\([^\n]*\)\.toBeVisible\(\);/, 'nullary matcher stays argument-less');
+  assert.match(bare, /await expect\([^\n]*\)\.toHaveCount\(0\);/, 'numeric matcher stays bare');
+  // Actions stay bare too — no injected options object.
+  assert.match(bare, /await page\.goto\('\/promotion-planning\/dashboard'\);/, 'goto stays bare');
+  assert.match(bare, /\.fill\(CUSTOMER\);/, 'fill stays bare (value only)');
+});
+
+test('seedTimeoutMs: a seed render injects { timeout } into every assertion form', () => {
+  const seed = renderSpec(FULL_TRACE, { seedTimeoutMs: 2000 });
+  // nullary (toBeVisible): the options object is the sole argument.
+  assert.match(seed, /\.toBeVisible\(\{ timeout: 2000 \}\);/, 'nullary matcher takes the options object alone');
+  // numeric (toHaveCount(0)): value first, then the options object.
+  assert.match(seed, /\.toHaveCount\(0, \{ timeout: 2000 \}\);/, 'numeric matcher keeps its value then the timeout');
+  // ref value (toHaveValue(CUSTOMER)): variable first, then the options object.
+  assert.match(seed, /\.toHaveValue\(CUSTOMER, \{ timeout: 2000 \}\);/, 'ref matcher keeps its variable then the timeout');
+  // Every assertion got one — there should be no bare (option-less) expect left.
+  const bareVisible = (seed.match(/\.toBeVisible\(\);/g) ?? []).length;
+  assert.equal(bareVisible, 0, 'no assertion is left without the short timeout');
+});
+
+test('seedTimeoutMs: a seed render injects { timeout } into located ACTIONS too (the biggest hang)', () => {
+  const seed = renderSpec(FULL_TRACE, { seedTimeoutMs: 2000 });
+  // click(): no positional arg → the options object is the sole argument.
+  assert.match(seed, /\.click\(\{ timeout: 2000 \}\);/, 'click takes the options object alone');
+  // fill(value): value first, then the options object.
+  assert.match(seed, /\.fill\(CUSTOMER, \{ timeout: 2000 \}\);/, 'fill keeps its value then the timeout');
+  // No bare click/fill left — an action on a vanished element must fail fast, not run to 120s.
+  assert.equal((seed.match(/\.click\(\);/g) ?? []).length, 0, 'no bare click left');
+});
+
+test('navTimeoutMs: goto gets the longer nav allowance, not the short step timeout', () => {
+  const seed = renderSpec(FULL_TRACE, { seedTimeoutMs: 2000, navTimeoutMs: 120000 });
+  // goto is an arrival — it must NOT be capped at 2s (a remote cold paint needs more).
+  assert.match(seed, /page\.goto\('\/promotion-planning\/dashboard', \{ timeout: 120000 \}\);/, 'goto uses the nav timeout');
+  assert.doesNotMatch(seed, /page\.goto\([^\n]*timeout: 2000/, 'goto is never given the 2s step timeout');
+});
+
+test('seedTimeoutMs: combined with checkLocators, the toHaveCount(1) probes also get it', () => {
+  const seed = renderSpec(FULL_TRACE, { checkLocators: true, seedTimeoutMs: 2000 });
+  // The injected uniqueness probes must fail fast too, or a stale prefix hangs on a
+  // vanished action locator instead of a vanished assertion.
+  assert.match(seed, /\.toHaveCount\(1, \{ timeout: 2000 \}\);/, 'uniqueness probe carries the short timeout');
+  assert.equal((seed.match(/\.toHaveCount\(1\)/g) ?? []).length, 0,
+    'no uniqueness probe is left without the timeout');
+});
+
+test('seedTimeoutMs: the seed render still parses as valid TS', () => {
+  assert.doesNotThrow(
+    () => parse(renderSpec(FULL_TRACE, { checkLocators: true, seedTimeoutMs: 2000, navTimeoutMs: 120000 }), { range: true, loc: true }),
+    'a timeout-injected seed is legal TypeScript');
+});
+
+
 // ── renderCandidate: each kind renders the expected expression ───────────────
 
 test('renderCandidate: every kind renders its getByX expression', () => {

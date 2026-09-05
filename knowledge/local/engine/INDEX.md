@@ -20,6 +20,10 @@ applies → the file to read.
 | a locator that matches more than one element — narrowing by scope/text/visibility instead of a numbered match | [`disambiguating-duplicates.md`](./disambiguating-duplicates.md) |
 | triaging a run where many steps failed — how to tell one root cause from the pile of downstream consequences, and diagnose only the first | [`cascading-failure.md`](./cascading-failure.md) |
 | writing a step that creates/updates/deletes something — why it must assert its own effect in the same step, and which assertion is a strong vs. weak checkpoint | [`write-checkpoint.md`](./write-checkpoint.md) |
+| creating an entity the run brings into existence (and later searching / editing / asserting on it) — why its name must be a run-unique dynamic value, not a fixed literal, so the spec stays idempotent and re-runnable | [`idempotent-creates.md`](./idempotent-creates.md) |
+| a step that moves between pages (a create that lands on a detail view, going back to a list to search, a save that navigates away) — navigate explicitly and wait for the destination's marker before acting, so it replays on a cold browser | [`page-transitions.md`](./page-transitions.md) |
+| writing an assertion — which matcher takes which value type (`toHaveCount` an integer, `toHaveText`/`toHaveValue` a string, `toBeVisible` none), so a type mismatch does not fail mechanically on every replay | [`assertion-matchers.md`](./assertion-matchers.md) |
+| recording a multi-step wizard or any action on an async-loaded element (a grid that fills after a prior selection, a control that renders late) — why a `browser_wait_for` does not replay and how to carry the wait into the step as an assertion, plus the `press`/`fill`/inner-field record shapes that bite here | [`wizard-async-elements.md`](./wizard-async-elements.md) |
 
 ## Project-specific knowledge
 
