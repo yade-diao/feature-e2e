@@ -284,7 +284,7 @@ function cloneOrPull(link) {
     const p = run('git', ['-C', link.dest, 'pull', '--ff-only', '--quiet']);
     if (p.code !== 0) return { sha: null, error: p.err || 'pull failed' };
   } else {
-    // Prefer gh (honours the user's github.tools.sap auth), fall back to git.
+    // Prefer gh (honours the user's existing auth), fall back to git.
     let c = link.repo ? run('gh', ['repo', 'clone', link.repo, link.dest]) : { code: 1 };
     if (c.code !== 0 && link.url) c = run('git', ['clone', link.url, link.dest]);
     if (c.code !== 0) return { sha: null, error: c.err || 'clone failed' };

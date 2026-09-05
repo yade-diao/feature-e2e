@@ -32,8 +32,8 @@
  *         value?: <ArgRef> }                // matcher argument, if any
  *     ],
  *     values?: {                            // named values referenced by actions/assertions
- *       PROMOTION_NAME: { kind: 'dynamic', expr: '`Auto-test${...}`' },  // re-evaluated each replay
- *       CUSTOMER:       { kind: 'fixed',   literal: 'L6 - SAPCostco...' } // frozen business input
+ *       ORDER_NAME: { kind: 'dynamic', expr: '`Auto-test${...}`' },  // re-evaluated each replay
+ *       CUSTOMER:   { kind: 'fixed',   literal: 'Acme Wholesale...' } // frozen business input
  *     }
  *   }
  *
@@ -46,7 +46,7 @@
  *
  * ### <ArgRef> — a literal, or a reference to a named value
  *   { literal: 'PD100046' }     // fixed business value, rendered as a string literal
- *   { ref: 'PROMOTION_NAME' }   // reference to values[PROMOTION_NAME], rendered as the bare identifier
+ *   { ref: 'ORDER_NAME' }   // reference to values[ORDER_NAME], rendered as the bare identifier
  *
  * The distinction between `dynamic` and `fixed` values is the one design point
  * the recorder cannot get from the page: a promotion name is regenerated on every
@@ -138,7 +138,7 @@ function validCandidate(c) {
  * rendered AST, not the legality of a value name. So reject it here, at write
  * time, where the offending record is still rejectable. Conservative on purpose:
  * ASCII letters/`_`/`$` to start, then word chars — the names the recorder ever
- * generates (PROMOTION_NAME, CUSTOMER) all fit, and anything exotic is refused.
+ * generates (ORDER_NAME, CUSTOMER) all fit, and anything exotic is refused.
  */
 function validIdentifier(name) {
   return typeof name === 'string' && /^[A-Za-z_$][A-Za-z0-9_$]*$/.test(name);
@@ -187,7 +187,7 @@ export function validateRecord(rec, priorValues = null) {
   }
 
   // Which value names a ref in this record may resolve to. A ref legitimately
-  // points at a value another record declared — Create defines PROMOTION_NAME,
+  // points at a value another record declared — Create defines ORDER_NAME,
   // Edit references it — so resolution is a whole-trace question the renderer
   // once owned alone. But the trace is written in order: when appendTrace passes
   // the values declared by every ALREADY-written record as `priorValues`, a ref

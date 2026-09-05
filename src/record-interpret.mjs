@@ -83,7 +83,7 @@ export function buildLocator(page, candidate) {
  * it once here, per step-set — same value seen by every ref in the record.
  *
  * A prior map lets a later record reference a value an earlier record declared
- * (Create's PROMOTION_NAME read by Edit), the whole-trace scope the renderer
+ * (Create's ORDER_NAME read by Edit), the whole-trace scope the renderer
  * gives value consts. The caller threads it across a feature's records.
  */
 export function resolveValues(record, prior = {}) {

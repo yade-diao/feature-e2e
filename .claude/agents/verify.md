@@ -215,16 +215,16 @@ after a refusal is far more expensive than the read.
 **Go looking — the injected knowledge block is a starting point, not the whole
 library.** You have `Read` and `Bash` (for `grep`): when you hit anything you are not
 certain how to record — an unfamiliar matcher, a control you cannot locate, a step
-type you have not seen — actively search `knowledge/local/` (and the linked
-`knowledge/external/rgm-e2e-knowledge/`) for it before guessing. `grep -ri "toHaveCount"
+type you have not seen — actively search `knowledge/local/` (and any linked external
+knowledge base under `knowledge/external/`) for it before guessing. `grep -ri "toHaveCount"
 knowledge/` or reading the domain's basics file will usually already hold the answer.
 Guessing and getting refused, then reading, is the slow path; reading first is the fast
 one. Treat the knowledge base as something you consult on your own initiative, not only
 what was handed to you.
 
 - The knowledge block names an **engine index** (`local/engine/`: locator strategy,
-  shadow-DOM inputs, search/combobox) and **`rgm-e2e-knowledge`**, whose
-  `conventions/ui5-interaction.md` catalogues UI5 interaction gotchas.
+  shadow-DOM inputs, search/combobox) and any linked **external knowledge base**, whose
+  `conventions/ui5-interaction.md`-style files catalogue UI-framework interaction gotchas.
 - **Filling a UI5 input is the common trap.** A `getByTestId('…')` on a UI5 field
   usually resolves to the **wrapper**, not the native `<input>` — unique (so it
   passes the count) but a `fill` on it silently does nothing. `record_step` also
@@ -325,7 +325,7 @@ Mark each value; getting it wrong is a real failure.
 - **fixed** — a stable business input the feature names (a customer, a product id):
   `{ kind: 'fixed', literal: 'PD100046' }`.
 
-An action or assertion refers to a value by `{ ref: 'PROMOTION_NAME' }` or carries a
+An action or assertion refers to a value by `{ ref: 'ORDER_NAME' }` or carries a
 `{ literal: '...' }`. The judgement is yours: a value identifying something this run
 creates, or carrying a time/sequence, is dynamic; anything the feature states as
 input is fixed.
@@ -357,7 +357,7 @@ into a locator `expr`, e.g.
 run's name into the spec; next run creates a different name and the row is never
 found. When a step must locate or assert on the just-created item, do NOT bake its
 name into the `expr` — assert on it through the value's ref instead: e.g. an
-assertion whose `value` is `{ ref: 'PROMOTION_NAME' }`, or a stable, name-independent
+assertion whose `value` is `{ ref: 'ORDER_NAME' }`, or a stable, name-independent
 check (the filtered row count is 1, a status cell reads 'Draft'). The rule "never
 freeze a dynamic value into a literal" applies to locator `expr` strings too, not
 just `arg`.
@@ -384,21 +384,21 @@ The object you pass as the `record_step` arguments (plus a `feature` field with 
   "scenario": "<the Scenario name>",
   "step": "<the feature step, verbatim, Gherkin keyword and all>",
   "values": {
-    "PROMOTION_NAME": { "kind": "dynamic", "expr": "`Auto-test${Date.now()}`" },
-    "CUSTOMER": { "kind": "fixed", "literal": "L6 - SAPCostco US NSQ01 L6" }
+    "ORDER_NAME": { "kind": "dynamic", "expr": "`Auto-test${Date.now()}`" },
+    "CUSTOMER": { "kind": "fixed", "literal": "Acme Wholesale US 001" }
   },
   "actions": [
-    { "method": "goto", "arg": { "literal": "/promotion-planning/dashboard" } },
+    { "method": "goto", "arg": { "literal": "/orders/dashboard" } },
     { "method": "fill",
       "locators": [
         { "kind": "testid", "id": "promo-name", "inner": "#inner" },
         { "kind": "placeholder", "text": "Promotion Name" }
       ],
-      "arg": { "ref": "PROMOTION_NAME" } }
+      "arg": { "ref": "ORDER_NAME" } }
   ],
   "assertions": [
     { "target": [ { "kind": "testid", "id": "promo-name", "inner": "#inner" } ],
-      "matcher": "toHaveValue", "value": { "ref": "PROMOTION_NAME" } }
+      "matcher": "toHaveValue", "value": { "ref": "ORDER_NAME" } }
   ]
 }
 ```

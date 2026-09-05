@@ -152,7 +152,7 @@ test('validateRecord: a ref resolved by the record\'s own values passes', () => 
 
 test('validateRecord: a ref resolved by a prior record\'s values passes', () => {
   assert.deepEqual(
-    validateRecord(usesRef('PROMOTION_NAME'), { PROMOTION_NAME: { kind: 'dynamic', expr: '`x`' } }),
+    validateRecord(usesRef('ORDER_NAME'), { ORDER_NAME: { kind: 'dynamic', expr: '`x`' } }),
     []);
 });
 

@@ -16,25 +16,14 @@ is injected automatically on every record; do **not** mount it with `--knowledge
 
 ## Shared references
 
-`_common/` — cross-domain references every business module points at:
-- [`_common/credentials.md`](_common/credentials.md) — persona → login email/role.
-- [`_common/placeholders.md`](_common/placeholders.md) — `${currentYear}`, `{yearCode}`, run-time IDs, the `supa` flag.
+`_common/` — cross-domain references every business module points at: shared
+per-element locating notes, plus whatever else your team wants every domain to
+see (login credentials, run-time placeholders). Empty out of the box.
 
 ## Business domains
 
 Each maps to a `features/<domain>/` project; mount its directory with
-`--knowledge` when recording that project.
-
-| Domain | Features | Read |
-| --- | --- | --- |
-| account-plan | AccountPlan, AccountPlanBaseline | [`account-plan/INDEX.md`](account-plan/INDEX.md) |
-| assortment | Assortment | [`assortment/INDEX.md`](assortment/INDEX.md) |
-| funds | FundsManagement, PromotionFunds | [`funds/INDEX.md`](funds/INDEX.md) |
-| trade-spend-config | TradeSpendConfig | [`trade-spend-config/INDEX.md`](trade-spend-config/INDEX.md) |
-| adapter-config | AdapterConfig | [`adapter-config/INDEX.md`](adapter-config/INDEX.md) |
-| change-handling | ChangeHandling | [`change-handling/INDEX.md`](change-handling/INDEX.md) |
-| responsibility-area | ResponsibilityAreaPerformance | [`responsibility-area/INDEX.md`](responsibility-area/INDEX.md) |
-
-Each business module holds an `INDEX.md` (when-to-read → which file) and one or
-more single-topic files. Values in these docs are rules and boundaries, not fixed
+`--knowledge` when recording that project. Empty out of the box — as you record
+a project, add `local/<domain>/INDEX.md` plus one file per topic (when-to-read →
+which file). Values in these docs should be rules and boundaries, not fixed
 answers — the agent chooses concrete values from what the page offers.

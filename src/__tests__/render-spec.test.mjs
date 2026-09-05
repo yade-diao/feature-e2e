@@ -73,11 +73,11 @@ const FULL_TRACE = [
     scenario: 'Create',
     step: "Given I open dashboard",
     values: {
-      PROMOTION_NAME: { kind: 'dynamic', expr: '`Auto-test${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 14)}`' },
-      CUSTOMER: { kind: 'fixed', literal: 'L6 - SAPCostco US NSQ01 L6' },
+      ORDER_NAME: { kind: 'dynamic', expr: '`Auto-test${new Date().toISOString().replace(/[^0-9]/g, "").slice(0, 14)}`' },
+      CUSTOMER: { kind: 'fixed', literal: 'Acme Wholesale US 001' },
     },
-    actions: [{ method: 'goto', arg: { literal: 'https://host.example/promotion-planning/dashboard' } }],
-    assertions: [{ target: [{ kind: 'role', role: 'heading', name: 'Account Plan' }], matcher: 'toBeVisible' }],
+    actions: [{ method: 'goto', arg: { literal: 'https://host.example/orders/dashboard' } }],
+    assertions: [{ target: [{ kind: 'role', role: 'heading', name: 'Dashboard' }], matcher: 'toBeVisible' }],
   },
   {
     scenario: 'Create',
@@ -92,9 +92,9 @@ const FULL_TRACE = [
     scenario: 'Create',
     step: 'And I set promotion name',
     actions: [
-      { method: 'fill', locators: [{ kind: 'placeholder', text: 'Promotion Name' }, { kind: 'testid', id: 'promo-name' }], arg: { ref: 'PROMOTION_NAME' } },
+      { method: 'fill', locators: [{ kind: 'placeholder', text: 'Order Name' }, { kind: 'testid', id: 'promo-name' }], arg: { ref: 'ORDER_NAME' } },
     ],
-    assertions: [{ target: [{ kind: 'placeholder', text: 'Promotion Name' }], matcher: 'toHaveValue', value: { ref: 'PROMOTION_NAME' } }],
+    assertions: [{ target: [{ kind: 'placeholder', text: 'Order Name' }], matcher: 'toHaveValue', value: { ref: 'ORDER_NAME' } }],
   },
   {
     scenario: 'Create',
@@ -199,7 +199,7 @@ test('seedTimeoutMs: omitting it leaves the promoted spec byte-for-byte unchange
   assert.match(bare, /await expect\([^\n]*\)\.toBeVisible\(\);/, 'nullary matcher stays argument-less');
   assert.match(bare, /await expect\([^\n]*\)\.toHaveCount\(0\);/, 'numeric matcher stays bare');
   // Actions stay bare too — no injected options object.
-  assert.match(bare, /await page\.goto\('\/promotion-planning\/dashboard'\);/, 'goto stays bare');
+  assert.match(bare, /await page\.goto\('\/orders\/dashboard'\);/, 'goto stays bare');
   assert.match(bare, /\.fill\(CUSTOMER\);/, 'fill stays bare (value only)');
 });
 
@@ -229,7 +229,7 @@ test('seedTimeoutMs: a seed render injects { timeout } into located ACTIONS too 
 test('navTimeoutMs: goto gets the longer nav allowance, not the short step timeout', () => {
   const seed = renderSpec(FULL_TRACE, { seedTimeoutMs: 2000, navTimeoutMs: 120000 });
   // goto is an arrival — it must NOT be capped at 2s (a remote cold paint needs more).
-  assert.match(seed, /page\.goto\('\/promotion-planning\/dashboard', \{ timeout: 120000 \}\);/, 'goto uses the nav timeout');
+  assert.match(seed, /page\.goto\('\/orders\/dashboard', \{ timeout: 120000 \}\);/, 'goto uses the nav timeout');
   assert.doesNotMatch(seed, /page\.goto\([^\n]*timeout: 2000/, 'goto is never given the 2s step timeout');
 });
 
@@ -298,15 +298,15 @@ test('renderLocator: driftability follows the ANCHOR source, not any method in t
 test('render: dynamic value becomes a runtime const, referenced not inlined', () => {
   const spec = renderSpec(FULL_TRACE);
   // The expression is present as a const, evaluated when the file loads.
-  assert.match(spec, /const PROMOTION_NAME = `Auto-test\$\{new Date\(\)/);
+  assert.match(spec, /const ORDER_NAME = `Auto-test\$\{new Date\(\)/);
   // The name is never frozen into a literal — the fill references the variable.
-  assert.match(spec, /\.fill\(PROMOTION_NAME\)/);
+  assert.match(spec, /\.fill\(ORDER_NAME\)/);
   assert.doesNotMatch(spec, /\.fill\('Auto-test/);
 });
 
 test('render: fixed value becomes a literal const', () => {
   const spec = renderSpec(FULL_TRACE);
-  assert.match(spec, /const CUSTOMER = 'L6 - SAPCostco US NSQ01 L6'/);
+  assert.match(spec, /const CUSTOMER = 'Acme Wholesale US 001'/);
   assert.match(spec, /\.fill\(CUSTOMER\)/);
 });
 
@@ -318,12 +318,12 @@ test('render: a dynamic value shared across scenarios is one variable', () => {
     {
       scenario: 'Edit',
       step: 'When I search the promotion by name',
-      actions: [{ method: 'fill', locators: [{ kind: 'placeholder', text: 'Search' }], arg: { ref: 'PROMOTION_NAME' } }],
+      actions: [{ method: 'fill', locators: [{ kind: 'placeholder', text: 'Search' }], arg: { ref: 'ORDER_NAME' } }],
       assertions: [{ target: [{ kind: 'role', role: 'row', name: 'match' }], matcher: 'toBeVisible' }],
     },
   ];
   const spec = renderSpec(trace);
-  assert.equal((spec.match(/const PROMOTION_NAME =/g) ?? []).length, 1, 'declared exactly once');
+  assert.equal((spec.match(/const ORDER_NAME =/g) ?? []).length, 1, 'declared exactly once');
   // One test for the whole feature, so scenarios share a browser context;
   // scenarios stay legible as comments.
   assert.equal((spec.match(/  test\(/g) ?? []).length, 1, 'the feature is one test');
@@ -335,7 +335,7 @@ test('render: a dynamic value shared across scenarios is one variable', () => {
 
 test('render: goto keeps the path, drops the origin', () => {
   const spec = renderSpec(FULL_TRACE);
-  assert.match(spec, /page\.goto\('\/promotion-planning\/dashboard'\)/);
+  assert.match(spec, /page\.goto\('\/orders\/dashboard'\)/);
   assert.doesNotMatch(spec, /goto\('https?:/);
 });
 
@@ -372,8 +372,8 @@ test('renderLocator: exact renders the option', () => {
 // ── trace read/write + validation ───────────────────────────────────────────
 
 test('trace: featureToTrace mirrors the spec path shape', () => {
-  const p = featureToTrace(join('features', 'rgm', 'promotion.feature'));
-  assert.equal(p, join('run', 'rgm', 'promotion.trace.jsonl'));
+  const p = featureToTrace(join('features', 'demo', 'checkout.feature'));
+  assert.equal(p, join('run', 'demo', 'checkout.trace.jsonl'));
 });
 
 test('trace: append then read round-trips records in order', () => {

@@ -142,7 +142,7 @@ export class ShadowRunner {
     this._context = null;
     this._page = null;
     // Named values accumulate across the feature's records, matching the
-    // renderer's file-level const block: a value Create declares (PROMOTION_NAME)
+    // renderer's file-level const block: a value Create declares (ORDER_NAME)
     // stays in scope for a later Edit record's ref. resolveValues merges each
     // record's own values onto this.
     this._values = {};

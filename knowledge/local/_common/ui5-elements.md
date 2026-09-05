@@ -56,8 +56,9 @@ content that must be waited for as a state (see `../engine/wizard-async-elements
   token — `fill` alone does not add the token. Repeat per value; confirm the token chip
   appears. Same commit mechanism as `../engine/search-combobox.md`.
 - **Verified example:** `getByTestId('filter-name').locator('#ui5-multi-combobox-input')`;
-  the account-plan dashboard filter uses the value-helper multi-input `simpleValueHelperMultiInput`
-  (a value-helper, not a plain textbox — a `getByLabel(...)`/`getByRole('textbox')` misses it).
+  a dashboard filter built on a value-helper multi-input still needs the inner-input
+  chain above (a value-helper, not a plain textbox — a `getByLabel(...)`/`getByRole('textbox')`
+  misses it).
 
 ## Value-help dialog (pick a row from a popup)
 
@@ -69,9 +70,9 @@ content that must be waited for as a state (see `../engine/wizard-async-elements
   state before clicking it (`../engine/wizard-async-elements.md`).
 - **Confirm bound:** after selecting, assert the value actually landed in the form (the
   selected row shows in the bound grid), not just that it was highlighted — selected ≠ bound.
-- **Verified example:** account-plan Create wizard sales-area/customer selection —
-  open `wizardValueHelperInputButton`, click the row filtered by `L3 - SAPCostco US L3`'s
-  `[data-selection-cell="true"]`, then verify it appears in the Customers grid.
+- **Verified example:** a create wizard's customer-selection step — open
+  `wizardValueHelperInputButton`, click the row filtered by the target customer's
+  `[data-selection-cell="true"]`, then verify it appears in the bound grid.
 
 ## Tree grid (expand to a leaf)
 
@@ -80,8 +81,8 @@ content that must be waited for as a state (see `../engine/wizard-async-elements
   (assert it visible) before expanding deeper or selecting — do not fixed-sleep
   (`../engine/wizard-async-elements.md`).
 - **Select a leaf:** click the target row's `[data-selection-cell="true"]`, then confirm selected.
-- **Verified example:** account-plan product tree Personal Care → Oral Care → Toothpaste,
-  each level's `[title="Expand Node"]`, leaf `[data-selection-cell="true"]`.
+- **Verified example:** a product tree, expanding each level's `[title="Expand Node"]`
+  down to the target leaf's `[data-selection-cell="true"]`.
 
 ## Radio / switch / checkbox (state toggles)
 
@@ -101,8 +102,8 @@ content that must be waited for as a state (see `../engine/wizard-async-elements
   (the name lives in shadow DOM, so flat filters match 0 or many, `../engine/web-components-shadow-dom.md`).
 - **Then the item:** open the menu, click the menu item by its `testid`; a confirm dialog
   (`getByRole('alertdialog')`) may follow.
-- **Verified example:** account-plan dashboard card — `menuButton` scoped to the card's
-  `cardContainer`, then `accountPlanCardDeleteMenuItem`, then the alertdialog's Delete.
+- **Verified example:** a dashboard card — `menuButton` scoped to the card's
+  `cardContainer`, then the card's own delete menu item, then the alertdialog's Delete.
 
 ## Link
 

@@ -16,39 +16,19 @@ prompt names the relevant index and lets the agent read the one topic it needs.
 | Path | What |
 | --- | --- |
 | [`local/engine/`](local/engine/INDEX.md) | Engine-general recording technique, product-neutral. Injected automatically on every record — never mounted with `--knowledge`. |
-| `local/_common/` | Cross-domain references: [`credentials.md`](local/_common/credentials.md) (persona → login), [`placeholders.md`](local/_common/placeholders.md) (`${currentYear}`, `{yearCode}`, run-time IDs, `supa`). |
-| `local/<domain>/` | Per-domain business knowledge (account-plan, assortment, funds, trade-spend-config, adapter-config, change-handling, responsibility-area). Mount with `--knowledge=knowledge/local/<domain>` when recording that project. |
+| `local/_common/` | Cross-domain references shared by every project — e.g. per-element locating notes, shared placeholder-resolution rules. Add your own here (credentials, run-time placeholders, etc). |
+| `local/<domain>/` | Per-domain business knowledge, one directory per project. Mount with `--knowledge=knowledge/local/<domain>` when recording that project. Empty out of the box — add your own as you record. |
 
 Full module list: [`local/INDEX.md`](local/INDEX.md).
 
 ## `external/`
 
 Synced clones — read each repo's own README/index; this project does not own or
-maintain their contents.
-
-### `external/rgm-e2e-knowledge/`
-
-Clone of `rgm/rgm-e2e-knowledge`. Environment definitions (`environments/*.yaml`
-— personas, URLs, roles) and per-area business manuals/workflows
-(`areas/<area>/`), plus cross-cutting `conventions/`. Declared for the `promotion`
-project in [`links.json`](links.json); synced with `npm run sync`.
-
-### `external/rgm-wiki-super/`
-
-Copy of the `wiki/` output of `rgm/rgm-wiki-super` — synthesized product knowledge
-assembled from wiki / Jira / Aha / git sources. Grouped by business, not by
-source. Start at [`external/rgm-wiki-super/index.md`](external/rgm-wiki-super/index.md):
-- `requirements/` — initiative-family synthesis (feature intent, business rules).
-- `codebase/` — code-derived notes.
-- `implementations/` — how requirements map to implementation.
-
-Useful when a moved feature needs deeper business context than its own domain
-knowledge carries — the agent reads the relevant page on demand.
-
-> Not committed (`external/` is gitignored) and not synced via `links.json` — it
-> is a manual copy. To rebuild it: `cp -R ~/Documents/rgm-wiki-super/wiki/.
-> knowledge/external/rgm-wiki-super/` (source repo: `rgm/rgm-wiki-super`, its
-> `wiki/` output).
+maintain their contents. Not shipped here: point `links.json` at your own
+external knowledge repo(s) per project, then `npm run sync`. A repo can hold
+whatever shape fits your team — environment definitions, per-area business
+manuals, synthesized product knowledge, cross-cutting conventions. See
+`links.schema.json` for the fields `links.json` supports.
 
 ## Config files
 

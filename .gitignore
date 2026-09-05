@@ -40,7 +40,8 @@ knowledge/external/
 # here carry an environment's login table, and a recording only means something
 # against the environment it was made on. The tool is what ships, not one
 # environment's suite.
-features/
+features/*
+!features/README.md
 
 # The run area — everything a recording produces (specs, traces, diagnoses) —
 # stays local. A recording only means something against the environment it was

@@ -155,8 +155,8 @@ re-records it correctly), not attribution and not accept:
 
 - **Dynamic** — a value generated *this* run (a just-created promotion name, an
   order id) must be referenced as a variable, never frozen as a literal. Cross-check
-  `record.values`: any entry with `kind:"dynamic"` (e.g. `PROMOTION_NAME`) must be
-  used through `{ref:"PROMOTION_NAME"}` in actions' `arg` and in assertion values —
+  `record.values`: any entry with `kind:"dynamic"` (e.g. `ORDER_NAME`) must be
+  used through `{ref:"ORDER_NAME"}` in actions' `arg` and in assertion values —
   and its runtime literal must NOT appear hardcoded inside a locator `expr` (e.g.
   `getByRole('row').filter({ hasText: 'Auto-test20260903090759' })` freezes the
   name). If a dynamic value's literal is baked into an `expr` or an `arg` literal

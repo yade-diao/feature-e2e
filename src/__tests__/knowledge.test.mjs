@@ -84,17 +84,17 @@ test('selectKnowledge inlines the engine core knowledge in full', () => {
 });
 
 test('selectKnowledge inlines the current feature domain basics and _common', () => {
-  // account-plan is a real domain with a basics file and shared _common.
-  const { text } = selectKnowledge('features/account-plan/AccountPlan.feature');
-  assert.match(text, /### account-plan-basics/, 'the domain basics is inlined');
-  assert.match(text, /### credentials/, 'shared _common credentials is inlined');
+  // demo is a fixture domain with a basics file and shared _common.
+  const { text } = selectKnowledge('features/demo/Demo.feature');
+  assert.match(text, /### demo-basics/, 'the domain basics is inlined');
+  assert.match(text, /### ui5-elements/, 'shared _common knowledge is inlined');
 });
 
 test('selectKnowledge does NOT inline another domain’s basics (stays on-demand)', () => {
-  // Recording account-plan must not carry funds/adapter basics — only the current
+  // Recording demo must not carry another domain's basics — only the current
   // domain is inlined; others stay on-demand.
-  const { text } = selectKnowledge('features/account-plan/AccountPlan.feature');
-  assert.ok(!/### funds-basics/.test(text), 'another domain basics is not inlined');
+  const { text } = selectKnowledge('features/demo/Demo.feature');
+  assert.ok(!/### other-domain-basics/.test(text), 'another domain basics is not inlined');
 });
 
 test('selectKnowledge reports an external clone when one is synced', () => {
@@ -119,8 +119,8 @@ test('selectKnowledge omits external when the clone is absent', () => {
 // ── extra knowledge bases: appended, local read in place, offline-safe ───────
 
 test('slugForRepo takes the last segment and drops .git', () => {
-  assert.equal(slugForRepo('rgm/rgm-e2e-knowledge'), 'rgm-e2e-knowledge');
-  assert.equal(slugForRepo('https://github.tools.sap/rgm/rgm-e2e-knowledge.git'), 'rgm-e2e-knowledge');
+  assert.equal(slugForRepo('acme/acme-e2e-knowledge'), 'acme-e2e-knowledge');
+  assert.equal(slugForRepo('https://github.example.com/acme/acme-e2e-knowledge.git'), 'acme-e2e-knowledge');
   assert.equal(slugForRepo('git@github.com:owner/name.git'), 'name');
 });
 
@@ -177,12 +177,12 @@ test('a base named twice is listed once', () => {
 // ── external: opt-in by project, offline-safe ────────────────────────────────
 
 test('linkForProject returns null for an unlinked project', () => {
-  const links = { projects: { rgm: { repo: 'rgm/rgm-e2e-knowledge', areas: ['kpi'] } } };
+  const links = { projects: { acme: { repo: 'acme/acme-e2e-knowledge', areas: ['kpi'] } } };
   assert.equal(linkForProject('other', links), null);
-  const rgm = linkForProject('rgm', links);
-  assert.equal(rgm.repo, 'rgm/rgm-e2e-knowledge');
-  assert.deepEqual(rgm.areas, ['kpi']);
-  assert.equal(rgm.conventions, true);   // default on
+  const acme = linkForProject('acme', links);
+  assert.equal(acme.repo, 'acme/acme-e2e-knowledge');
+  assert.deepEqual(acme.areas, ['kpi']);
+  assert.equal(acme.conventions, true);   // default on
 });
 
 test('loadExternalKnowledge returns [] when the clone is absent', () => {

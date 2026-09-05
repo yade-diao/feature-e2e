@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "External knowledge links",
-  "description": "Maps a project (the first directory under tests/features) to the external knowledge repository and areas it draws on. The only committed file that names a specific external repo — and it names only a repo/URL and area folder names, never the product detail those areas contain. Populate `projects` per project, e.g. \"rgm\": { \"repo\": \"rgm/rgm-e2e-knowledge\", \"url\": \"https://github.tools.sap/rgm/rgm-e2e-knowledge.git\", \"areas\": [\"kpi\", \"profiles\"], \"conventions\": true }.",
+  "description": "Maps a project (the first directory under tests/features) to the external knowledge repository and areas it draws on. The only committed file that names a specific external repo — and it names only a repo/URL and area folder names, never the product detail those areas contain. Populate `projects` per project, e.g. \"acme\": { \"repo\": \"acme/acme-e2e-knowledge\", \"url\": \"https://github.com/acme/acme-e2e-knowledge.git\", \"areas\": [\"kpi\", \"profiles\"], \"conventions\": true }.",
   "type": "object",
   "required": ["version", "projects"],
   "properties": {
